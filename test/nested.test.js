@@ -5,6 +5,7 @@ import os from "node:os";
 import path from "node:path";
 
 import { loadConfig } from "../src/config.js";
+import { WORK_PATHS_VERSION } from "../src/discovery/work.js";
 import { nestedCorpora, primaryMemoryFile } from "../src/commands/analyze.js";
 import { foldEvidence, renderEvidenceForPrompt } from "../src/fold.js";
 import { setLoggerSink } from "../src/logger.js";
@@ -474,7 +475,7 @@ test("out-of-repo paths do not make in-repo API work cross-cutting", async () =>
   );
 });
 
-test("attribution reads a local session once, and never places a session that ran on another machine", async () => {
+test("attribution caches local paths by resolver version and never places remote sessions", async () => {
   const repo = makeRepo({ "AGENTS.md": "# root\n" });
   const state = new State(repo.root).ensure();
   const sessionPath = path.join(repo.root, "..", `${path.basename(repo.root)}-pi-session.jsonl`);
@@ -497,6 +498,16 @@ test("attribution reads a local session once, and never places a session that ra
   assert.deepEqual(first.get(transcriptIdentity(local)), ["apps/api/src/orders.ts"]);
   assert.equal(first.get(transcriptIdentity(remote)), null, "a session from another machine is never placed");
   assert.deepEqual(first.get(transcriptIdentity(unreadable)), [""], "no readable tool call: the cwd alone places it");
+
+  const cachePath = path.join(state.root, "nested", "attribution.json");
+  for (const workPathsVersion of [undefined, WORK_PATHS_VERSION - 1]) {
+    const cache = state.readJsonFile(cachePath, null);
+    cache.workPathsVersion = workPathsVersion;
+    cache.entries[transcriptIdentity(local)].paths = [];
+    state.writeJsonFile(cachePath, cache);
+    const refreshed = await attributeTranscripts([local], repo, state);
+    assert.deepEqual(refreshed.get(transcriptIdentity(local)), ["apps/api/src/orders.ts"]);
+  }
 
   // Same content signature: the cached placement stands without reading the file again.
   fs.rmSync(sessionPath);
@@ -533,6 +544,7 @@ test(
     const identity = transcriptIdentity(transcript);
     state.writeJsonFile(path.join(state.root, "nested", "attribution.json"), {
       version: 7,
+      workPathsVersion: WORK_PATHS_VERSION,
       roots: checkoutRoots(repo),
       entries: { [identity]: { content: "same", paths: [] } },
     });

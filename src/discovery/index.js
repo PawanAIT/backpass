@@ -10,7 +10,7 @@ import * as cursorCli from "./adapters/cursor-cli.js";
 import * as cursorIde from "./adapters/cursor-ide.js";
 
 import { associate, passesStrict } from "./association.js";
-import { workPaths, workTier } from "./work.js";
+import { WORK_PATHS_VERSION, workPaths, workTier } from "./work.js";
 import { collectHosts, resolveHostList } from "./hosts.js";
 import { createControlPath } from "./remote/ssh.js";
 import { isSelfSession } from "./self.js";
@@ -79,7 +79,7 @@ export async function discoverTranscripts({
   // where its tool calls worked. The paths each one names are cached by content.
   const tier = userFilter ? null : workTier(repo);
   const priorWork = cache.work && typeof cache.work === "object" ? cache.work : {};
-  const work = { tier, prior: priorWork, seen: {}, changed: false, scope, repo };
+  const work = { tier, entries: { ...priorWork }, changed: false, scope, repo };
 
   const transcripts = [];
   const identities = new Set();
@@ -151,12 +151,9 @@ export async function discoverTranscripts({
     }
   }
 
-  if (tier) {
-    const dropped = Object.keys(priorWork).some((identity) => !(identity in work.seen));
-    if (work.changed || dropped) {
-      cache.work = work.seen;
-      cacheDirty = true;
-    }
+  if (work.changed) {
+    cache.work = work.entries;
+    cacheDirty = true;
   }
   if (cacheDirty) config.state.writeScanCache(cache);
 
@@ -415,17 +412,21 @@ async function associateByWork(adapter, pending, { work, stats, stateDir }) {
   for (const { row, id } of pending) {
     const draft = toTranscript(adapter, row, null, id);
     const content = draft.contentSignature || `${draft.mtimeMs}:${draft.bytes}`;
-    const prior = work.prior[draft.identity];
-    let paths = prior?.content === content && Array.isArray(prior.paths) ? prior.paths : null;
+    const prior = work.entries[draft.identity];
+    let paths =
+      prior?.version === WORK_PATHS_VERSION && prior.content === content && Array.isArray(prior.paths)
+        ? prior.paths
+        : null;
     if (!paths) {
       try {
         paths = workPaths(draft, (await readTranscript(draft)).events);
       } catch {
-        paths = [];
+        stats.skipped += 1;
+        continue;
       }
+      work.entries[draft.identity] = { version: WORK_PATHS_VERSION, content, paths };
       work.changed = true;
     }
-    work.seen[draft.identity] = { content, paths };
     const association = work.tier.associate(paths);
     if (!association) {
       stats.skipped += 1;

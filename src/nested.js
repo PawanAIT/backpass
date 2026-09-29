@@ -1,7 +1,14 @@
 import path from "node:path";
 
 import { readTranscript } from "./discovery/index.js";
-import { checkoutRoots, localCwd, projectWorkPath, resolveToolPath, toolPaths } from "./discovery/work.js";
+import {
+  WORK_PATHS_VERSION,
+  checkoutRoots,
+  localCwd,
+  projectWorkPath,
+  resolveToolPath,
+  toolPaths,
+} from "./discovery/work.js";
 import { UserError, warn } from "./logger.js";
 import {
   memorySetHash,
@@ -246,6 +253,7 @@ export async function attributeTranscripts(transcripts, repo, state) {
   const cache = state.readJsonFile(cachePath, null);
   const prior =
     cache?.version === ATTRIBUTION_VERSION &&
+    cache.workPathsVersion === WORK_PATHS_VERSION &&
     cache.roots?.length === roots.length &&
     cache.roots.every((root, index) => root === roots[index]) &&
     cache.entries
@@ -271,7 +279,12 @@ export async function attributeTranscripts(transcripts, repo, state) {
     if (paths) entries[identity] = { content, paths };
     attribution.set(identity, paths);
   }
-  state.writeJsonFile(cachePath, { version: ATTRIBUTION_VERSION, roots, entries });
+  state.writeJsonFile(cachePath, {
+    version: ATTRIBUTION_VERSION,
+    workPathsVersion: WORK_PATHS_VERSION,
+    roots,
+    entries,
+  });
   return attribution;
 }
 

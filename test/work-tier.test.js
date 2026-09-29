@@ -6,7 +6,7 @@ import path from "node:path";
 import { execFileSync } from "node:child_process";
 
 import { passesStrict } from "../src/discovery/association.js";
-import { discoverTranscripts } from "../src/discovery/index.js";
+import { ADAPTERS, discoverTranscripts } from "../src/discovery/index.js";
 import { workPaths, workTier } from "../src/discovery/work.js";
 import { loadConfig } from "../src/config.js";
 import { resolveRepo } from "../src/repo.js";
@@ -96,6 +96,32 @@ test("the session belongs here when this repo's checkouts hold most of its check
   );
 });
 
+test("checkout ownership follows symlinks for cwd, recorded roots, and tool paths", () => {
+  const { repo, repoRoot, otherRoot, scratch } = layout();
+  const tier = workTier(repo);
+  for (const [name, root] of [
+    ["ours", repoRoot],
+    ["theirs", otherRoot],
+  ]) {
+    const link = path.join(scratch, name);
+    fs.symlinkSync(path.join(root, "src"), link, "junction");
+    assert.equal(tier.isCandidate({ cwd: link }), false);
+    assert.equal(tier.isCandidate({ cwd: scratch, gitRoot: link }), false);
+    assert.equal(tier.isCandidate({ cwd: scratch, gitRoot: path.join(link, "missing") }), false);
+    for (const file of ["app.ts", "missing/new.ts"]) {
+      const linkedPath = path.join(link, file);
+      assert.deepEqual(tier.associate([linkedPath]), tier.associate([path.join(root, "src", file)]));
+      assert.equal(
+        tier.associate([path.join(repoRoot, "src/app.ts"), linkedPath])?.tier ?? null,
+        root === repoRoot ? 2.5 : null,
+      );
+    }
+  }
+  const fileLink = path.join(scratch, "app.ts");
+  fs.symlinkSync(path.join(otherRoot, "src/app.ts"), fileLink, "file");
+  assert.equal(tier.associate([path.join(repoRoot, "src/app.ts"), fileLink]), null);
+});
+
 test("work paths are the structured tool-call paths, resolved the way nested attribution resolves them", () => {
   const { repoRoot, scratch } = layout();
   const unc = `\\\\wsl.localhost\\Ubuntu${repoRoot.replaceAll("/", "\\")}`;
@@ -150,6 +176,9 @@ test("discovery keeps a session that worked here from outside every checkout, an
   });
   writePiSession(home, { id: "unrelated", cwd: scratch, paths: [`${otherRoot}/src/app.ts`, `${scratch}/plan.md`] });
   writePiSession(home, { id: "other-repo", cwd: otherRoot, paths: [`${repoRoot}/src/app.ts`] });
+  const linkedCwd = path.join(scratch, "api");
+  fs.symlinkSync(path.join(otherRoot, "src"), linkedCwd, "junction");
+  writePiSession(home, { id: "linked-other-repo", cwd: linkedCwd, paths: [`${repoRoot}/src/app.ts`] });
   writePiSession(home, { id: "plain", cwd: repoRoot, paths: [] });
 
   const previousHome = process.env.HOME;
@@ -171,8 +200,11 @@ test("discovery keeps a session that worked here from outside every checkout, an
     const worked = first.transcripts.find((t) => t.nativeId === "orchestrator");
     assert.equal(worked.association.confidence, "work");
     assert.equal(first.perHarness.pi.matched, 2);
-    assert.equal(first.perHarness.pi.skipped, 2, "the unrelated and other-repo sessions are not this repo's");
+    assert.equal(first.perHarness.pi.skipped, 3, "unrelated sessions and other checkouts are not this repo's");
     assert.equal(Object.keys(stored.work).length, 2, "both scratch-folder sessions' work paths are cached");
+
+    const other = await discoverTranscripts({ repo: resolveRepo(otherRoot), config, strict: true });
+    assert.equal(other.transcripts.find((t) => t.nativeId === "linked-other-repo")?.association.tier, 1);
 
     // Same content signature: the cached work paths stand without reading the file again.
     if (process.getuid?.() !== 0) {
@@ -188,3 +220,116 @@ test("discovery keeps a session that worked here from outside every checkout, an
     process.env.HOME = previousHome;
   }
 });
+
+function cachedDiscovery(t, direct) {
+  const { base, repo, repoRoot, scratch } = layout();
+  const file = writePiSession(path.join(base, "home"), {
+    id: "cached",
+    cwd: scratch,
+    paths: [path.join(repoRoot, "src/app.ts")],
+  });
+  const original = ADAPTERS.pi;
+  const enumerate = () => {
+    const stat = fs.statSync(file);
+    return [{ key: file, path: file, mtimeMs: stat.mtimeMs, bytes: stat.size }];
+  };
+  const adapter = { ...original, enumerate };
+  if (direct) {
+    adapter.discover = ({ cutoffMs }) =>
+      enumerate()
+        .filter((row) => !cutoffMs || row.mtimeMs >= cutoffMs)
+        .map((row) => ({ ...row, ...original.classify(row), contentSignature: `${row.mtimeMs}:${row.bytes}` }));
+  }
+  ADAPTERS.pi = adapter;
+  t.after(() => {
+    ADAPTERS.pi = original;
+  });
+  const read = t.mock.method(adapter, "read");
+  const config = loadConfig(repoRoot, { discovery: { harnesses: ["pi"], since: "all" } });
+  let stored = { version: 1, entries: {} };
+  config.state = {
+    root: path.join(repoRoot, ".backpass"),
+    readScanCache: () => structuredClone(stored),
+    writeScanCache: (cache) => {
+      stored = structuredClone(cache);
+    },
+  };
+  return {
+    adapter,
+    config,
+    read,
+    file,
+    cache: () => stored,
+    scan: (options = {}) => discoverTranscripts({ repo, config, strict: true, ...options }),
+  };
+}
+
+for (const direct of [false, true]) {
+  const store = direct ? "direct store" : "file store";
+
+  test(`${store}: failed work reads are retried without changing content`, async (t) => {
+    const fixture = cachedDiscovery(t, direct);
+    fixture.read.mock.mockImplementationOnce(() => {
+      throw new Error("SQLITE_BUSY");
+    });
+    const failed = await fixture.scan();
+    assert.equal(failed.transcripts.length, 0);
+    assert.equal(failed.perHarness.pi.skipped, 1);
+    assert.deepEqual(fixture.cache().work || {}, {});
+    const recovered = await fixture.scan();
+    assert.equal(recovered.transcripts[0]?.association.tier, 2.5);
+    await fixture.scan();
+    assert.equal(fixture.read.mock.callCount(), 2);
+
+    const prior = structuredClone(fixture.cache().work);
+    fs.appendFileSync(fixture.file, "\n");
+    fixture.read.mock.mockImplementationOnce(() => {
+      throw new Error("EMFILE");
+    });
+    assert.equal((await fixture.scan()).transcripts.length, 0);
+    assert.deepEqual(fixture.cache().work, prior);
+    assert.equal((await fixture.scan()).transcripts[0]?.association.tier, 2.5);
+    await fixture.scan();
+    assert.equal(fixture.read.mock.callCount(), 4);
+  });
+
+  test(`${store}: partial scans preserve work entries`, async (t) => {
+    const fixture = cachedDiscovery(t, direct);
+    await fixture.scan();
+    const prior = structuredClone(fixture.cache().work);
+    await fixture.scan({ harnesses: [] });
+    assert.deepEqual(fixture.cache().work, prior);
+    fixture.config.discovery.since = "1d";
+    await fixture.scan({ now: Date.now() + 10 * 86400000 });
+    assert.deepEqual(fixture.cache().work, prior);
+    fixture.config.discovery.since = "all";
+    const method = direct ? "discover" : "enumerate";
+    t.mock.method(fixture.adapter, method).mock.mockImplementationOnce(() => {
+      throw new Error("store unavailable");
+    });
+    const failed = await fixture.scan();
+    assert.equal(failed.perHarness.pi.error, "store unavailable");
+    assert.deepEqual(fixture.cache().work, prior);
+    assert.equal((await fixture.scan()).transcripts[0]?.association.tier, 2.5);
+    assert.equal(fixture.read.mock.callCount(), 1);
+  });
+
+  test(`${store}: missing or stale resolver versions refresh cached work paths`, async (t) => {
+    const fixture = cachedDiscovery(t, direct);
+    await fixture.scan();
+    const [identity] = Object.keys(fixture.cache().work);
+    for (const version of [undefined, -1]) {
+      fixture.cache().work[identity].version = version;
+      fixture.cache().work[identity].paths = [];
+      assert.equal((await fixture.scan()).transcripts[0]?.association.tier, 2.5);
+    }
+    await fixture.scan();
+    assert.equal(fixture.read.mock.callCount(), 3);
+
+    fs.appendFileSync(fixture.file, "\n");
+    fixture.read.mock.mockImplementationOnce(() => ({ events: [] }));
+    assert.equal((await fixture.scan()).transcripts.length, 0);
+    assert.equal((await fixture.scan()).transcripts.length, 0);
+    assert.equal(fixture.read.mock.callCount(), 4, "successfully read empty paths are cached");
+  });
+}

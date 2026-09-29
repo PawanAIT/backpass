@@ -36,6 +36,7 @@ const PATH_FIELDS = ["file_path", "filePath", "notebook_path", "path"];
 const PATCH_FILE = /^\*\*\* (?:Add File|Update File|Delete File|Move to): (.+)$/gm;
 
 export const WORK_TIER = 2.5;
+export const WORK_PATHS_VERSION = 1;
 
 /** The paths a session's tool calls name, as recorded. */
 export function toolPaths(events) {
@@ -171,7 +172,7 @@ export function projectWorkPath(absolute, roots) {
 export function checkoutLocator() {
   const memo = new Map();
   return (p) => {
-    let dir = path.resolve(p);
+    let dir = realpathDeepest(p);
     while (!fs.existsSync(dir)) {
       const parent = path.dirname(dir);
       if (parent === dir) return null;
