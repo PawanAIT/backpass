@@ -10,6 +10,7 @@ import * as cursorCli from "./adapters/cursor-cli.js";
 import * as cursorIde from "./adapters/cursor-ide.js";
 
 import { associate, passesStrict } from "./association.js";
+import { workPaths, workTier } from "./work.js";
 import { collectHosts, resolveHostList } from "./hosts.js";
 import { createControlPath } from "./remote/ssh.js";
 import { isSelfSession } from "./self.js";
@@ -74,6 +75,11 @@ export async function discoverTranscripts({
     ((descriptor) => associate(descriptor, repo, { worktreeGlobs: config.discovery.worktreeGlobs }));
   const stateDir = config.state?.root;
   const userFilter = scope?.kind === "user";
+  // Tier 2.5 (./work.js) places a project-scope session that started in no checkout by
+  // where its tool calls worked. The paths each one names are cached by content.
+  const tier = userFilter ? null : workTier(repo);
+  const priorWork = cache.work && typeof cache.work === "object" ? cache.work : {};
+  const work = { tier, prior: priorWork, seen: {}, changed: false, scope, repo };
 
   const transcripts = [];
   const identities = new Set();
@@ -95,7 +101,7 @@ export async function discoverTranscripts({
     emitProgress("discover:harness:start", { harness });
 
     try {
-      const found = adapter.discover
+      const { found, pending } = adapter.discover
         ? await discoverDirect(adapter, {
             repo,
             config,
@@ -105,6 +111,7 @@ export async function discoverTranscripts({
             associateFn,
             stateDir,
             userFilter,
+            tier,
           })
         : discoverFiles(adapter, {
             repo,
@@ -116,11 +123,13 @@ export async function discoverTranscripts({
             associateFn,
             stateDir,
             userFilter,
+            tier,
             markDirty: () => {
               cacheDirty = true;
             },
           });
-      const unique = found.filter((transcript) => {
+      const worked = await associateByWork(adapter, pending, { work, stats, stateDir });
+      const unique = [...found, ...worked].filter((transcript) => {
         if (identities.has(transcript.identity)) return false;
         identities.add(transcript.identity);
         return true;
@@ -142,6 +151,13 @@ export async function discoverTranscripts({
     }
   }
 
+  if (tier) {
+    const dropped = Object.keys(priorWork).some((identity) => !(identity in work.seen));
+    if (work.changed || dropped) {
+      cache.work = work.seen;
+      cacheDirty = true;
+    }
+  }
   if (cacheDirty) config.state.writeScanCache(cache);
 
   const perHost = [];
@@ -280,12 +296,20 @@ function tierCounts(found) {
   return tiers;
 }
 
-async function discoverDirect(adapter, { repo, config, cutoffMs, strict, stats, associateFn, stateDir, userFilter }) {
+async function discoverDirect(
+  adapter,
+  { repo, config, cutoffMs, strict, stats, associateFn, stateDir, userFilter, tier },
+) {
   const rows = await adapter.discover({ cutoffMs, repo, config });
   const out = [];
+  const pending = [];
   for (const row of rows) {
     stats.scanned += 1;
     const association = associateFn({ cwd: row.cwd, remotes: row.remotes || [], gitRoot: row.gitRoot });
+    if (!association && tier?.isCandidate(row)) {
+      pending.push({ row, id: row.id });
+      continue;
+    }
     if (!passesStrict(association, strict)) {
       stats.skipped += 1;
       continue;
@@ -301,15 +325,16 @@ async function discoverDirect(adapter, { repo, config, cutoffMs, strict, stats, 
     }
     out.push(transcript);
   }
-  return out;
+  return { found: out, pending };
 }
 
 function discoverFiles(
   adapter,
-  { repo, config, cutoffMs, strict, stats, cache, markDirty, associateFn, stateDir, userFilter },
+  { repo, config, cutoffMs, strict, stats, cache, markDirty, associateFn, stateDir, userFilter, tier },
 ) {
   const candidates = adapter.enumerate({ cutoffMs, repo, config });
   const out = [];
+  const pending = [];
 
   for (const candidate of candidates) {
     if (cutoffMs && candidate.mtimeMs < cutoffMs) continue;
@@ -353,6 +378,10 @@ function discoverFiles(
       remotes: descriptor.remotes || [],
       gitRoot: descriptor.gitRoot,
     });
+    if (!association && tier?.isCandidate(descriptor)) {
+      pending.push({ row: { ...candidate, ...descriptor }, id: descriptor.id });
+      continue;
+    }
     if (!passesStrict(association, strict)) {
       stats.skipped += 1;
       continue;
@@ -372,6 +401,47 @@ function discoverFiles(
     out.push(transcript);
   }
 
+  return { found: out, pending };
+}
+
+/**
+ * Tier 2.5 for the sessions a scan handed back as candidates: read each one's work paths
+ * (cached by content signature, so a scan reads only new and changed sessions) and keep
+ * the ones whose work was in this repository. Always deterministic, so `--strict` keeps
+ * them; backpass's own sessions are dropped as on every other tier.
+ */
+async function associateByWork(adapter, pending, { work, stats, stateDir }) {
+  const out = [];
+  for (const { row, id } of pending) {
+    const draft = toTranscript(adapter, row, null, id);
+    const content = draft.contentSignature || `${draft.mtimeMs}:${draft.bytes}`;
+    const prior = work.prior[draft.identity];
+    let paths = prior?.content === content && Array.isArray(prior.paths) ? prior.paths : null;
+    if (!paths) {
+      try {
+        paths = workPaths(draft, (await readTranscript(draft)).events);
+      } catch {
+        paths = [];
+      }
+      work.changed = true;
+    }
+    work.seen[draft.identity] = { content, paths };
+    const association = work.tier.associate(paths);
+    if (!association) {
+      stats.skipped += 1;
+      continue;
+    }
+    if (work.scope && work.scope.kind !== "user") {
+      association.project = work.repo.root;
+      association.projectRoot = work.repo.root;
+    }
+    const transcript = toTranscript(adapter, row, association, id);
+    if (isSelfSession(transcript, { stateDir })) {
+      stats.self += 1;
+      continue;
+    }
+    out.push(transcript);
+  }
   return out;
 }
 

@@ -14,6 +14,10 @@ import { isWindowsPath, localPath } from "./paths.js";
  *                              is how a second clone's interactive history attaches.
  *   tier 2    deterministic  - a recorded git remote matches one of the repo's remotes;
  *                              survives worktree deletion (codex, grok)
+ *   tier 2.5  deterministic  - the session started in no checkout, and its tool calls
+ *                              worked mostly in this repo's checkouts (`./work.js`);
+ *                              survives `--strict`. Judged in discovery, which reads the
+ *                              session, so it is not applied here.
  *   tier 3    best-effort    - dead cwd whose last segment is the repo dir name, or that
  *                              matches a user-supplied worktree glob; excluded by --strict
  *
@@ -179,7 +183,8 @@ export function associateRemote({ cwd, remotes = [], gitRoot = null }, repo, opt
   return null;
 }
 
+/** `--strict` keeps every deterministic tier; tier 3 is the only best-effort one. */
 export function passesStrict(association, strict) {
   if (!association) return false;
-  return strict ? association.tier <= 2 : true;
+  return strict ? association.tier < 3 : true;
 }

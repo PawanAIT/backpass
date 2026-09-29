@@ -1,8 +1,7 @@
-import fs from "node:fs";
 import path from "node:path";
 
 import { readTranscript } from "./discovery/index.js";
-import { isWindowsPath, localPath } from "./discovery/paths.js";
+import { checkoutRoots, localCwd, projectWorkPath, resolveToolPath, toolPaths } from "./discovery/work.js";
 import { UserError, warn } from "./logger.js";
 import {
   memorySetHash,
@@ -52,10 +51,7 @@ import { transcriptIdentity } from "./transcript.js";
 
 export const ATTRIBUTION_VERSION = 8;
 
-/** Tool-input fields that name a file or directory a session worked in. */
-const PATH_FIELDS = ["file_path", "filePath", "notebook_path", "path"];
-/** File headers of the apply_patch grammar (Codex); each names one file the patch touches. */
-const PATCH_FILE = /^\*\*\* (?:Add File|Update File|Delete File|Move to): (.+)$/gm;
+export { checkoutRoots, projectWorkPath, toolPaths };
 
 /** A nested file's always-loaded budget. */
 export function nestedBudget(config) {
@@ -211,72 +207,12 @@ export function renderAlsoLoaded(rootFile, weight) {
   );
 }
 
-function realpathDeepest(p) {
-  const absolute = path.resolve(p);
-  let existing = absolute;
-  const tail = [];
-  while (!fs.existsSync(existing)) {
-    const parent = path.dirname(existing);
-    if (parent === existing) return absolute;
-    tail.unshift(path.basename(existing));
-    existing = parent;
-  }
-  try {
-    return path.join(fs.realpathSync(existing), ...tail);
-  } catch {
-    return absolute;
-  }
-}
-
-/** Every checkout of this repository discovery knows, deepest first. */
-export function checkoutRoots(repo) {
-  const roots = [repo.realRoot, ...(repo.worktrees || []), ...(repo.siblingWorktrees || [])].filter(Boolean);
-  return [...new Set(roots.map(realpathDeepest))].sort((a, b) => b.length - a.length);
-}
-
-/** Only in-repo work paths count toward directory attribution. */
-export function projectWorkPath(absolute, roots) {
-  const real = realpathDeepest(absolute);
-  for (const root of roots) {
-    const relative = path.relative(root, real);
-    if (relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) continue;
-    return relative.split(path.sep).join("/");
-  }
-  return null;
-}
-
-/** The paths a session's tool calls name, as recorded. */
-export function toolPaths(events) {
-  const out = [];
-  const patchFiles = (text, workdir) => {
-    if (!text.includes("*** Begin Patch")) return;
-    for (const match of text.matchAll(PATCH_FILE)) out.push({ raw: match[1].trim(), workdir });
-  };
-  for (const event of events || []) {
-    if (event?.kind !== "tool") continue;
-    const input = event.input;
-    if (typeof input === "string") {
-      patchFiles(input, null);
-      continue;
-    }
-    if (!input || typeof input !== "object") continue;
-    const workdir =
-      [input.workdir, input.cwd].find((value) => typeof value === "string" && value.trim())?.trim() || null;
-    for (const key of PATH_FIELDS) {
-      if (typeof input[key] === "string" && input[key].trim()) out.push({ raw: input[key].trim(), workdir });
-    }
-    for (const value of Object.values(input)) if (typeof value === "string") patchFiles(value, workdir);
-  }
-  return out;
-}
-
 /**
  * Where one session worked, as sorted repo-relative paths from tool calls, falling back
  * to its cwd when no tool paths are recorded. Paths outside known checkouts are dropped.
- * `localPath` in discovery/paths.js owns local mappings; an unmappable tool path or
- * workdir must not fall back to the process cwd. Absolute tool paths do not need a workdir.
- * Relative and backslash-rooted paths inherit their recorded base's Windows semantics
- * before mapping, so a drive or share root remains the boundary for `..`.
+ * Each tool path is resolved by `resolveToolPath` in `./discovery/work.js`, which also
+ * places the work-path association tier: an unmappable path or workdir never falls back
+ * to the process cwd.
  *
  * @param {{ cwd?: string | null }} transcript
  * @param {object[]} events
@@ -284,33 +220,13 @@ export function toolPaths(events) {
  * @param {{ wsl?: import("./discovery/paths.js").WslEnvironment | null }} [options]
  */
 export function workedPaths(transcript, events, roots, { wsl } = {}) {
-  const recordedCwd = localPath(transcript.cwd, { wsl });
-  const cwd = recordedCwd && path.isAbsolute(recordedCwd) ? recordedCwd : null;
-  const out = new Set();
+  const cwd = localCwd(transcript, { wsl });
   const named = toolPaths(events);
   if (!named.length && cwd) named.push({ raw: cwd, workdir: null });
+  const out = new Set();
   for (const entry of named) {
-    const independent = path.isAbsolute(entry.raw) || isWindowsPath(entry.raw);
-    if (entry.raw.startsWith("~") || (!independent && entry.workdir?.startsWith("~"))) continue;
-    let recordedWorkdir = entry.workdir;
-    if (
-      recordedWorkdir &&
-      !path.isAbsolute(recordedWorkdir) &&
-      !isWindowsPath(recordedWorkdir) &&
-      isWindowsPath(transcript.cwd)
-    ) {
-      recordedWorkdir = path.win32.resolve(`${transcript.cwd}\\`, recordedWorkdir);
-    }
-    const workdir = recordedWorkdir === null ? null : localPath(recordedWorkdir, { wsl });
-    if (!independent && entry.workdir !== null && workdir === null) continue;
-    const recordedBase = workdir && path.isAbsolute(workdir) ? recordedWorkdir : transcript.cwd;
-    const recordedRaw =
-      !independent && isWindowsPath(recordedBase) ? path.win32.resolve(`${recordedBase}\\`, entry.raw) : entry.raw;
-    const raw = localPath(recordedRaw, { wsl });
-    if (raw === null) continue;
-    const base = workdir ? (path.isAbsolute(workdir) ? workdir : cwd ? path.resolve(cwd, workdir) : null) : cwd;
-    if (!path.isAbsolute(raw) && !base) continue;
-    const relative = projectWorkPath(path.resolve(base || "", raw), roots);
+    const absolute = resolveToolPath(entry, transcript, { wsl });
+    const relative = absolute === null ? null : projectWorkPath(absolute, roots);
     if (relative !== null) out.add(relative);
   }
   return [...out].sort();

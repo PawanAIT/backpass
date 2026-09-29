@@ -239,7 +239,7 @@ Hermes collection includes CLI and ACP sessions, plus TUI sessions with an absol
 `sessions.cwd`. Gateway, cron, and WhatsApp sessions are excluded because their recorded
 cwd belongs to a shared process, not a project.
 
-Association runs in four tiers:
+Association runs in five tiers:
 
 1. **Tier 1 - deterministic.** The session's cwd is (or sits inside) one of this repo's
    worktrees.
@@ -254,7 +254,18 @@ Association runs in four tiers:
 3. **Tier 2 - deterministic, survives deletion.** A git remote recorded in the transcript
    matches one of the repo's remotes. This is how codex and grok stay attributable long
    after the worktree is gone.
-4. **Tier 3 - best-effort.** A dead path whose last segment is the repo's directory name,
+4. **Tier 2.5 - deterministic, work paths.** The session started in a live directory that
+   is no checkout at all (a home directory, a scratch folder, an orchestrator's working
+   folder), and its tool calls worked here: of the structured paths they name (the same
+   ones that place work for nested memory files), those in this repo's checkouts outnumber
+   those in every other checkout together. Paths in no checkout count for neither side,
+   and a checkout sharing a git remote with this repo counts as this repo. A majority can
+   hold for one repo only, so no session is claimed twice, and a session that started
+   inside any checkout, or recorded another repo's remote, is never placed this way. Each
+   such session is read once to find its paths, which are cached by content in
+   `.backpass/scan-cache.json`; sessions collected over SSH are not placed this way.
+   `--strict` keeps this tier.
+5. **Tier 3 - best-effort.** A dead path whose last segment is the repo's directory name,
    or one matching a glob you configured. Labelled as such, and excluded by `--strict`.
 
 On macOS and Linux outside WSL, recorded Windows drive paths (`C:\work\repo`, `C:/work/repo`) and UNC paths (`\\server\share\repo`, `//server/share/repo`) are excluded from the path tiers and nested-file attribution; a matching recorded git remote still associates the session at tier 2.

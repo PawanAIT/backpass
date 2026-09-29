@@ -276,6 +276,7 @@ test("--strict keeps only the deterministic tiers", () => {
   assert.equal(passesStrict({ tier: 1 }, true), true);
   assert.equal(passesStrict({ tier: 1.5 }, true), true);
   assert.equal(passesStrict({ tier: 2 }, true), true);
+  assert.equal(passesStrict({ tier: 2.5 }, true), true);
   assert.equal(passesStrict({ tier: 3 }, true), false);
   assert.equal(passesStrict({ tier: 3 }, false), true);
   assert.equal(passesStrict(null, false), false);
