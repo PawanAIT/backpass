@@ -456,7 +456,7 @@ async function associateByWork(adapter, pending, { work, stats, stateDir }) {
       association.project = work.repo.root;
       association.projectRoot = work.repo.root;
     }
-    const transcript = toTranscript(adapter, { ...row, contentSignature: content }, association, id);
+    const transcript = toTranscript(adapter, row, association, id);
     if (row.self || isSelfSession(transcript, { stateDir, readHead: !adapter.sqliteBacked })) {
       stats.self += 1;
       continue;
