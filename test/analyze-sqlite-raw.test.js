@@ -8,7 +8,7 @@ import { spawnSync } from "node:child_process";
 import { DatabaseSync } from "node:sqlite";
 import { randomUUID } from "node:crypto";
 
-import { analyzeTranscripts } from "../src/analyze.js";
+import { analyzeTranscripts, reclaimExpiredRawFiles } from "../src/analyze.js";
 import { State } from "../src/state.js";
 
 /**
@@ -243,8 +243,7 @@ for (const signal of ["SIGINT", "SIGTERM", "SIGKILL"]) {
         assert.equal(seen.rawPath.includes(path.join(".backpass", "nested")), nested);
         if (signal === "SIGKILL") {
           assert.equal(fs.existsSync(seen.rawPath), true, "SIGKILL cannot run exit cleanup");
-          // Another namespace's live analysis may reuse the killed run's PID; its lease is fresh.
-          const liveFile = path.join(path.dirname(seen.rawPath), `${result.pid}-${randomUUID()}.jsonl`);
+          const liveFile = path.join(path.dirname(seen.rawPath), `${randomUUID()}.jsonl`);
           fs.writeFileSync(liveFile, "live analysis events\n", { mode: 0o600 });
           fs.rmSync(database);
           const early = analyze(dir, home);
@@ -293,10 +292,10 @@ test(
   },
 );
 
-test("analysis keeps live root and nested raw files and reclaims expired ones, whatever their PID", () => {
+test("analysis keeps live root and nested raw files and reclaims expired leases", () => {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), "backpass-sqlite-raw-home-"));
   const dir = initRepo();
-  const preload = path.join(binDir, "shared-pid.mjs");
+  const preload = path.join(binDir, "raw-leases.mjs");
   const filesLog = path.join(binDir, "raw-files.json");
   fs.writeFileSync(
     preload,
@@ -308,7 +307,7 @@ if (process.argv[1] === ${JSON.stringify(CLI)}) {
     const rawDir = path.join(process.cwd(), ".backpass", subdir);
     fs.mkdirSync(rawDir, { recursive: true });
     return [0, ${RAW_LEASE_EXPIRED_MS}].map((age) => {
-      const file = path.join(rawDir, process.pid + "-" + randomUUID() + ".jsonl");
+      const file = path.join(rawDir, randomUUID() + ".jsonl");
       fs.writeFileSync(file, "analysis events\\n", { mode: 0o600 });
       const at = new Date(Date.now() - age);
       fs.utimesSync(file, at, at);
@@ -370,7 +369,7 @@ test("a running call renews its raw file's lease", async (t) => {
 });
 
 for (const nested of [false, true]) {
-  test(`concurrent analysis preserves this process's active ${nested ? "nested" : "root"} raw file`, async (t) => {
+  test(`reclamation preserves this process's active ${nested ? "nested" : "root"} raw file`, async (t) => {
     const home = fs.mkdtempSync(path.join(os.tmpdir(), "backpass-sqlite-raw-home-"));
     const dir = initRepo();
     const database = writeStore(home, dir);
@@ -396,14 +395,12 @@ for (const nested of [false, true]) {
             activeFile = path.join(stateDir, "raw", files[0]);
             const before = fs.readFileSync(activeFile, "utf8");
             for (const root of [rootStateDir, stateDir, state.root]) {
-              const concurrent = await analyzeTranscripts({
-                transcripts: [],
-                memoryFile: { path: "AGENTS.md", units: [] },
-                memoryHash: "test-memory",
-                repo: { root: dir },
-                config: { state: new State(dir, { stateDir: root, exclude: false }), jobs: 1 },
-              });
-              assert.equal(concurrent.total, 0);
+              const expiredFile = path.join(stateDir, "raw", `${randomUUID()}.jsonl`);
+              fs.writeFileSync(expiredFile, "expired analysis events\n");
+              const expired = new Date(Date.now() - RAW_LEASE_EXPIRED_MS);
+              fs.utimesSync(expiredFile, expired, expired);
+              reclaimExpiredRawFiles(root);
+              assert.equal(fs.existsSync(expiredFile), false);
               assert.equal(fs.readFileSync(activeFile, "utf8"), before);
             }
             return { text: JSON.stringify({ positive: [], negative: [], gaps: [] }) };

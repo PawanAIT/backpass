@@ -39,7 +39,7 @@ const activeRawFiles = new Set();
  */
 const RAW_LEASE_RENEW_MS = 60_000;
 const RAW_LEASE_MS = 15 * 60_000;
-const RAW_FILE_NAME = /^[1-9]\d*-[0-9a-f-]{36}\.jsonl$/;
+const RAW_FILE_NAME = /^[0-9a-f-]{36}\.jsonl$/;
 let leaseTimer = null;
 
 process.once("exit", () => {
@@ -99,7 +99,7 @@ export function reclaimExpiredRawFiles(stateRoot) {
     if (!fs.existsSync(dir) || !fs.lstatSync(dir).isDirectory()) continue;
     for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
       const file = path.join(dir, entry.name);
-      if (!entry.isFile() || !RAW_FILE_NAME.test(entry.name) || activeRawFiles.has(file)) continue;
+      if (!entry.isFile() || !RAW_FILE_NAME.test(entry.name)) continue;
       try {
         if (now - fs.statSync(file).mtimeMs > RAW_LEASE_MS) fs.rmSync(file, { force: true });
       } catch {
@@ -230,7 +230,7 @@ function promptPathFor(state, transcript) {
  */
 function sessionRawPath(transcript, state) {
   if (transcript.host || !getAdapter(transcript.harness)?.sqliteBacked || !state?.root) return null;
-  return path.resolve(state.root, "raw", `${process.pid}-${randomUUID()}.jsonl`);
+  return path.resolve(state.root, "raw", `${randomUUID()}.jsonl`);
 }
 
 async function analyzeOne({
