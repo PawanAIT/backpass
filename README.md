@@ -557,7 +557,7 @@ without asking for one.
 A review made somewhere else can arrive as `--decisions`, the vector the surface sends:
 `backpass apply --decisions "e1=accepted e2=rejected:too-narrow"`.
 It is for someone who chose to let a script they trust decide for their own repo, so it is never a default and it is strict: every token names one edit of the proposal, a verdict, and at most one of the reasons above, or nothing is written.
-The flag is repeatable: all supplied vectors are checked together as one vector, and naming an edit twice is refused, even across flags.
+The flag is repeatable: all supplied vectors are checked together as one vector, each must name at least one edit, and naming an edit twice is refused, even across flags.
 Edits it does not name stay untouched, and every gate below still applies.
 
 The live budget gauge is not just a readout. Apply rechecks the accepted subset against
