@@ -754,6 +754,7 @@ entry. The probe is a filter, not a promise: if the chosen harness answers `AUTH
 rejects the model, or returns a clean exit with no output at all (a provider account out
 of quota or credits, often swallowed before it reaches stderr) mid-run, backpass falls
 through to the next candidate and says so.
+A blank exit is first retried once on the same candidate, because one blank turn can also be a passing provider hiccup; a pinned agent that stays blank stops the run.
 Model-turn timeouts never fall through, whether enforced by backpass or reported by acpx itself; in analysis, only that transcript fails and is retried next run, including with a pinned agent.
 A clean blank exit that consumed nearly the whole `--timeout` budget is also treated as a timeout, for compatibility with older acpx versions.
 When a whole ladder is exhausted the error lists every candidate with what to run to fix it.

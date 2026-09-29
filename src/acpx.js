@@ -257,9 +257,10 @@ export function isBlankOutput(text) {
  * quality problem: the prompt contract always requires at least an empty JSON object
  * (`"An empty array is a valid and useful answer"`), so blank output means the turn
  * never really ran - most often an upstream provider error (exhausted credits, a
- * suspended key) that an ACP bridge swallows without ever writing to stderr. Unlike
- * garbled prose, no real work was done, so it is safe to demote the candidate and
- * retry with the next one in the ladder rather than burning the whole run on it.
+ * suspended key) that an ACP bridge swallows without ever writing to stderr, sometimes a
+ * passing provider hiccup. Unlike garbled prose, no real work was done, so it is safe to
+ * retry the candidate once and then demote it and retry with the next one in the ladder
+ * rather than burning the whole run on it (`withFallthrough` in `src/agents.js`).
  * Call this from inside a `withFallthrough` callback, before the caller's own
  * `extractJson` check, so the throw is still in scope to trigger a fallthrough.
  *
