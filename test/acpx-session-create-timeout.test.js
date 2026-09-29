@@ -107,17 +107,22 @@ test("a stalled harness no longer claims the effort override is unsupported", as
   );
 });
 
-for (const [stderr, detail] of [
-  ["", ""],
-  ["[acpx] tokens: input=0 output=0 total=0\n", ": [acpx] tokens: input=0 output=0 total=0"],
-  ["\nadapter startup timed out\nextra detail\n", ": adapter startup timed out"],
+for (const [scenario, stderr, detail] of [
+  ["empty stderr", "", ""],
+  ["accounting only", "[acpx] tokens: input=0 output=0 total=0\n", ""],
+  ["adapter error", "\nadapter startup timed out\nextra detail\n", ": adapter startup timed out"],
+  [
+    "noise before adapter error",
+    "[acpx] tokens: input=0 output=0 total=0\n[acpx] session closed\nadapter startup timed out\nextra detail\n",
+    ": adapter startup timed out",
+  ],
 ]) {
-  test(`acpx session-create timeout names its own limit${detail || " without stderr"}`, async () => {
+  test(`acpx timeout exit identifies session creation and probing without noise: ${scenario}`, async () => {
     process.env.FAKE_ACPX_MODE = "timeout-exit";
     process.env.FAKE_ACPX_STDERR = stderr;
     try {
       const options = { agent: "codex", sessionName: "backpass-create-timeout-exit", cwd: fixtureDir };
-      const message = `acpx ended the call at its own timeout (exit 3)${detail}`;
+      const message = `acpx codex session create ended at its own timeout (exit 3)${detail}`;
       const named = (err) => {
         assert.ok(err instanceof UserError, String(err));
         assert.equal(err.message, message);
@@ -128,7 +133,7 @@ for (const [stderr, detail] of [
       await assert.rejects(() => sessionPrompt({ ...options, effort: "medium", promptFile }), named);
       assert.deepEqual(await probeSession(options), {
         verdict: "timeout",
-        detail: message,
+        detail: `acpx codex probe ended at its own timeout (exit 3)${detail}`,
         availableModels: [],
       });
     } finally {

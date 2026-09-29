@@ -147,18 +147,23 @@ test("a blank session prompt clearly short of the budget keeps the empty-output 
 // acpx >= 0.19 no longer exits clean at its budget: it ends the turn and exits with its
 // TIMEOUT code (3). Read generically, a pinned agent's long prompt stopped a whole run
 // as "failed unexpectedly (exit 3)"; named a timeout, it fails only that transcript.
-for (const [stderr, detail] of [
-  ["", ""],
-  ["[acpx] tokens: input=0 output=0 total=0\n", ": [acpx] tokens: input=0 output=0 total=0"],
-  ["\nadapter startup timed out\nextra detail\n", ": adapter startup timed out"],
+for (const [scenario, stderr, detail] of [
+  ["empty stderr", "", ""],
+  ["accounting only", "[acpx] tokens: input=0 output=0 total=0\n", ""],
+  ["adapter error", "\nadapter startup timed out\nextra detail\n", ": adapter startup timed out"],
+  [
+    "noise before adapter error",
+    "[acpx] tokens: input=0 output=0 total=0\n[acpx] session closed\nadapter startup timed out\nextra detail\n",
+    ": adapter startup timed out",
+  ],
 ]) {
-  test(`acpx timeout exit names its own limit on both model-turn routes${detail || " without stderr"}`, async () => {
+  test(`acpx timeout exit identifies both model-turn routes without noise: ${scenario}`, async () => {
     process.env.FAKE_ACPX_MODE = "timeout-exit";
     process.env.FAKE_ACPX_STDERR = stderr;
     try {
-      const named = (err) => {
+      const named = (label) => (err) => {
         assert.ok(err instanceof AcpxError, String(err));
-        assert.equal(err.message, `acpx ended the call at its own timeout (exit 3)${detail}`);
+        assert.equal(err.message, `acpx codex ${label} ended at its own timeout (exit 3)${detail}`);
         assert.equal(err.timedOut, true);
         assert.equal(err.code, ACPX_EXIT_TIMEOUT);
         assert.equal(err.stderr, stderr);
@@ -167,7 +172,7 @@ for (const [stderr, detail] of [
       };
       await assert.rejects(
         () => execOneShot({ agent: "codex", promptFile, cwd: fixtureDir, timeoutSeconds: 2 }),
-        named,
+        named("exec"),
       );
       await assert.rejects(
         () =>
@@ -179,7 +184,7 @@ for (const [stderr, detail] of [
             cwd: fixtureDir,
             timeoutSeconds: 2,
           }),
-        named,
+        named("session prompt"),
       );
     } finally {
       process.env.FAKE_ACPX_MODE = "budget-blank";
