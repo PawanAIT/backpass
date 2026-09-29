@@ -94,28 +94,35 @@ export function parseDriveMounts(text) {
   return drives;
 }
 
-let driveTable = null;
-let wslKernel = null;
+let hostDrives = null;
 
 /**
- * The WSL environment backpass runs in, or null when it is not WSL. The distro comes
- * from `WSL_DISTRO_NAME`, which WSL sets for every process it starts; the mount table
- * is read once.
+ * The WSL environment backpass runs in, or null when it is not WSL.
  *
- * @param {{ platform?: NodeJS.Platform, env?: NodeJS.ProcessEnv }} [options]
+ * WSL is recognized by what only WSL provides: a kernel release naming Microsoft or WSL,
+ * or drive-root mounts of Windows drives, which a custom WSL 2 kernel keeps without the
+ * name. `WSL_DISTRO_NAME` alone proves nothing, since any child process can inherit it,
+ * so it only names the distro once WSL is recognized.
+ *
+ * @param {{ platform?: NodeJS.Platform, env?: NodeJS.ProcessEnv, kernel?: string, mountinfo?: string }} [options]
+ *   `kernel` and `mountinfo` default to this machine's `os.release()` and
+ *   `/proc/self/mountinfo`; the mount table is read once.
  * @returns {WslEnvironment | null}
  */
-export function wslEnvironment({ platform = process.platform, env = process.env } = {}) {
+export function wslEnvironment({ platform = process.platform, env = process.env, kernel, mountinfo } = {}) {
   if (platform !== "linux") return null;
-  const distro = env.WSL_DISTRO_NAME || null;
-  if (wslKernel === null) wslKernel = /microsoft/i.test(os.release());
-  if (!wslKernel) return null;
-  if (driveTable === null) {
+  const drives = mountinfo === undefined ? hostDriveMounts() : parseDriveMounts(mountinfo);
+  if (drives.size === 0 && !/microsoft|wsl/i.test(kernel ?? os.release())) return null;
+  return { distro: env.WSL_DISTRO_NAME || null, drives };
+}
+
+function hostDriveMounts() {
+  if (hostDrives === null) {
     try {
-      driveTable = parseDriveMounts(fs.readFileSync("/proc/self/mountinfo", "utf8"));
+      hostDrives = parseDriveMounts(fs.readFileSync("/proc/self/mountinfo", "utf8"));
     } catch {
-      driveTable = new Map();
+      hostDrives = new Map();
     }
   }
-  return { distro, drives: driveTable };
+  return hostDrives;
 }
