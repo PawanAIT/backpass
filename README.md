@@ -312,8 +312,11 @@ deterministically: user and assistant turns verbatim, each tool call collapsed t
 (`tool: Bash "npm test" -> 1 failing`), tool output truncated, injected harness scaffolding
 dropped, secrets redacted. Typical reduction is **96-99%**.
 
-The distilled trace ends with the path to the raw transcript, so the analysis agent can
-open the original when - and only when - a specific claim needs it.
+The distilled trace ends with the path to the raw transcript, so the analysis agent can open the original when - and only when - a specific claim needs it.
+For a session in a local SQLite store (opencode, hermes, Cursor CLI, Cursor IDE), the analysis call names a file of that session's normalized events instead of the store, which may contain other sessions or require queries against an undocumented schema.
+The file is written with mode `0600` under `raw/` in the active [state directory](#state), only for non-trivial sessions, and removed when the call finishes or during catchable process exits, including SIGINT or SIGTERM.
+After an uncatchable exit such as SIGKILL, leftover files require manual removal once no analysis is using them.
+Analysis never prunes another run's raw files: PIDs cannot establish ownership or liveness across PID namespaces sharing a state directory.
 
 ### 3. Calculate loss - one cheap call per transcript
 
@@ -883,6 +886,7 @@ exclude (`.git/info/exclude`, written by `backpass init`) rather than the tracke
   rejections.json        edits you turned down, and the evidence behind them
   gap-ledger.json        gap sightings by gap and session, accumulated across runs
   hosts/                 transcripts fetched from SSH hosts (mode 0700), pruned after 30 days unused
+  raw/                   temporary session events (see Distill)
   apply/apply.html       the rendered review surface
 ```
 

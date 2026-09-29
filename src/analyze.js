@@ -1,10 +1,11 @@
 import fs from "node:fs";
 import path from "node:path";
+import { randomUUID } from "node:crypto";
 
 import { extractJson, runModelCall, usageRecord } from "./acpx.js";
 import { distill } from "./distill.js";
 import { classifyInteraction } from "./interaction.js";
-import { readTranscript } from "./discovery/index.js";
+import { getAdapter, readTranscript } from "./discovery/index.js";
 import { instructionUnits, renderInstructionIndex } from "./memory.js";
 import { renderSkillIndexForAnalysis } from "./skills.js";
 import { renderPrompt } from "./prompts.js";
@@ -29,6 +30,17 @@ const MIN_TOOL_CALLS = 3;
 
 let callCounter = 0;
 const seenNotes = new Set();
+const activeRawFiles = new Set();
+
+process.once("exit", () => {
+  for (const file of activeRawFiles) {
+    try {
+      fs.rmSync(file, { force: true });
+    } catch (err) {
+      warn(`could not remove raw transcript ${file}: ${err.message}`);
+    }
+  }
+});
 
 /** The same adapter limitation would repeat once per transcript; say it once per run. */
 function noteOnce(note) {
@@ -141,6 +153,19 @@ function promptPathFor(state, transcript) {
   return path.join(state.applyDir, "..", "prompts", `${safeFileName(transcriptIdentity(transcript))}.md`);
 }
 
+/**
+ * The raw-transcript escape hatch must open one session, not expose a shared database
+ * or require queries against an undocumented schema. File-backed sessions and remote
+ * cached copies already have session-specific paths; local SQLite sessions need a
+ * temporary export here. See README.md's Distill section for its lifecycle.
+ *
+ * @returns {string | null}
+ */
+function sessionRawPath(transcript, state) {
+  if (transcript.host || !getAdapter(transcript.harness)?.sqliteBacked || !state?.root) return null;
+  return path.resolve(state.root, "raw", `${process.pid}-${randomUUID()}.jsonl`);
+}
+
 async function analyzeOne({
   transcript,
   memoryFile,
@@ -153,10 +178,11 @@ async function analyzeOne({
   alsoLoaded = "",
 }) {
   const raw = await readTranscript(transcript);
+  const rawFile = sessionRawPath(transcript, config.state);
   const distilled = distill(raw.events, {
     ...transcript,
     model: raw.model,
-    rawPath: raw.rawPath,
+    rawPath: rawFile ?? raw.rawPath,
   });
 
   emitProgress("analyze:lane", {
@@ -184,49 +210,66 @@ async function analyzeOne({
     };
   }
 
-  const prompt = renderPrompt("analysis", {
-    MEMORY_PATH: memoryFile.path,
-    INSTRUCTION_INDEX: renderInstructionIndex(memoryFile),
-    ALSO_LOADED: alsoLoaded,
-    SKILLS: skillIndex,
-    OPEN_GAPS: openGapIndex,
-    TRACE: distilled.trace,
-  });
+  try {
+    if (rawFile) {
+      fs.mkdirSync(path.dirname(rawFile), { recursive: true, mode: 0o700 });
+      const lines = [
+        JSON.stringify({ harness: transcript.harness, session: transcript.nativeId, model: raw.model || null }),
+        ...raw.events.map((event) => JSON.stringify(event)),
+      ];
+      activeRawFiles.add(rawFile);
+      fs.writeFileSync(rawFile, `${lines.join("\n")}\n`, { mode: 0o600, flag: "wx" });
+    }
 
-  const promptFile = promptPathFor(config.state, transcript);
-  fs.mkdirSync(path.dirname(promptFile), { recursive: true });
-  fs.writeFileSync(promptFile, prompt);
-
-  let ranWith = null;
-  const result = await config.agents.withFallthrough("analysis", async (pick) => {
-    ranWith = pick.agent;
-    const call = {
-      agent: pick.agent,
-      model: pick.model,
-      promptFile,
-      cwd: modelCwd || repo.root,
-      timeoutSeconds: config.timeoutSeconds,
-      promptRetries: config.promptRetries,
-    };
-    // Route effortful calls through a fresh per-transcript session so each harness's
-    // invocation-scoped overlay or safe fallback is applied; otherwise one-shot is cheaper.
-    return runModelCall(call, pick, {
-      sessionName: () => `backpass-analysis-${process.pid}-${slot}-${++callCounter}`,
+    const prompt = renderPrompt("analysis", {
+      MEMORY_PATH: memoryFile.path,
+      INSTRUCTION_INDEX: renderInstructionIndex(memoryFile),
+      ALSO_LOADED: alsoLoaded,
+      SKILLS: skillIndex,
+      OPEN_GAPS: openGapIndex,
+      TRACE: distilled.trace,
     });
-  });
-  for (const note of result.notes || []) noteOnce(note);
 
-  const parsed = extractJson(result.text);
-  if (!parsed) {
-    throw new Error("analysis returned no parseable JSON");
+    const promptFile = promptPathFor(config.state, transcript);
+    fs.mkdirSync(path.dirname(promptFile), { recursive: true });
+    fs.writeFileSync(promptFile, prompt);
+
+    let ranWith = null;
+    const result = await config.agents.withFallthrough("analysis", async (pick) => {
+      ranWith = pick.agent;
+      const call = {
+        agent: pick.agent,
+        model: pick.model,
+        promptFile,
+        cwd: modelCwd || repo.root,
+        timeoutSeconds: config.timeoutSeconds,
+        promptRetries: config.promptRetries,
+      };
+      // Route effortful calls through a fresh per-transcript session so each harness's
+      // invocation-scoped overlay or safe fallback is applied; otherwise one-shot is cheaper.
+      return runModelCall(call, pick, {
+        sessionName: () => `backpass-analysis-${process.pid}-${slot}-${++callCounter}`,
+      });
+    });
+    for (const note of result.notes || []) noteOnce(note);
+
+    const parsed = extractJson(result.text);
+    if (!parsed) {
+      throw new Error("analysis returned no parseable JSON");
+    }
+
+    return {
+      status: "ok",
+      evidence: sanitizeEvidence(parsed, memoryFile, distilled.trace),
+      usage: usageRecord(ranWith, result),
+      distilled,
+    };
+  } finally {
+    if (rawFile) {
+      fs.rmSync(rawFile, { force: true });
+      activeRawFiles.delete(rawFile);
+    }
   }
-
-  return {
-    status: "ok",
-    evidence: sanitizeEvidence(parsed, memoryFile, distilled.trace),
-    usage: usageRecord(ranWith, result),
-    distilled,
-  };
 }
 
 /**
