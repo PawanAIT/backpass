@@ -589,6 +589,13 @@ hunk bytes. The browser surface can attach an optional reason (`wrong-evidence`,
 `already-covered`, `too-narrow`, `too-broad`, `disagree`); `--no-ui` records the rejection
 without asking for one.
 
+A review made somewhere else can arrive as `--decisions`, the vector the surface sends:
+`backpass apply --decisions "e1=accepted e2=rejected:too-narrow"`. It is for someone who
+chose to let a script they trust decide for their own repo, so it is never a default and
+it is strict: every token names one edit of the proposal, a verdict, and at most one of the
+reasons above, or nothing is written. Edits it does not name stay untouched, and every gate
+below still applies.
+
 The live budget gauge is not just a readout. Apply rechecks the accepted subset against
 the same budget gate as synthesis: stay under the cap, or shrink if the file is already
 over. An incompatible set writes nothing and does not record rejections, so you can pick
@@ -619,6 +626,7 @@ the repository may have changed.
 backpass apply --no-ui     # same decision, in the terminal
 backpass apply --no-open   # print the surface URL, don't launch a browser
 backpass apply --dry-run   # show what would be written
+backpass apply --decisions "e1=accepted e2=rejected:disagree"   # decided elsewhere
 ```
 
 ### 9. Which file is the weights
