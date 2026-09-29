@@ -1,6 +1,7 @@
 import path from "node:path";
 
 import { emptyInteractionSignals, interactionSignals } from "../../interaction.js";
+import { SELF_SESSION_SENTINEL } from "../../sentinel.js";
 import { home, listDirs, readJsonFile, statOrNull } from "./shared.js";
 import { openReadOnly, safeJsonParse } from "./sqlite.js";
 
@@ -16,6 +17,12 @@ import { openReadOnly, safeJsonParse } from "./sqlite.js";
  * `session.directory`, deleted worktrees included, and both listing and reading are
  * indexed. Older opencode versions used file storage under `storage/`; that layout is
  * handled as a fallback so long-lived machines still yield transcripts.
+ *
+ * acpx drives opencode, so backpass's own analysis and synthesis calls land in this
+ * store under the repo's cwd. There is no transcript file for `../self.js` to read, so
+ * the listing query reads each session's first user text part and the row is marked
+ * `self` when it opens with the sentinel every backpass prompt starts with. A session
+ * with no user text at all, such as the one each agent probe creates, is not listed.
  */
 
 export const name = "opencode";
@@ -40,24 +47,44 @@ function tableHasColumn(db, table, column) {
     .some((entry) => entry.name === column);
 }
 
+function hasTables(db, ...names) {
+  const check = db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?");
+  return names.every((name) => check.get(name) !== undefined);
+}
+
+/** The first text part of a session's first user message: where an acpx prompt begins. */
+const FIRST_USER_PART = `(SELECT pt.data
+     FROM message m
+     JOIN part pt ON pt.message_id = m.id
+    WHERE m.session_id = s.id
+      AND json_extract(m.data, '$.role') = 'user'
+      AND json_extract(pt.data, '$.type') = 'text'
+    ORDER BY m.time_created, m.id, pt.id
+    LIMIT 1)`;
+
 export async function discover({ cutoffMs }) {
   const db = await openReadOnly(dbPath());
   if (!db) return legacyDiscover({ cutoffMs });
 
   try {
     const parentSelect = tableHasColumn(db, "session", "parent_id") ? ", s.parent_id AS parent_id" : "";
+    const firstUserSelect = hasTables(db, "message", "part") ? `, ${FIRST_USER_PART} AS first_user_part` : "";
     const rows = db
       .prepare(
         `SELECT s.id AS id, s.directory AS directory, s.title AS title,
                 s.time_created AS time_created, s.time_updated AS time_updated,
-                p.worktree AS worktree${parentSelect}
+                p.worktree AS worktree${parentSelect}${firstUserSelect}
            FROM session s
            LEFT JOIN project p ON p.id = s.project_id
           WHERE (? IS NULL OR s.time_updated >= ?)`,
       )
       .all(cutoffMs ?? null, cutoffMs ?? 0);
 
-    return rows.map((row) => ({
+    // A session with no user text recorded nothing: opencode files one for every acpx
+    // `sessions new` (backpass's own agent probes among them) and every window opened and
+    // closed unused. It is not listed.
+    const recorded = firstUserSelect ? rows.filter((row) => row.first_user_part != null) : rows;
+    return recorded.map((row) => ({
       key: `opencode:${row.id}`,
       id: row.id,
       path: dbPath(),
@@ -72,10 +99,15 @@ export async function discover({ cutoffMs }) {
       model: null,
       extra: { sessionId: row.id },
       interactionSignals: row.parent_id ? interactionSignals({ parentId: row.parent_id }) : emptyInteractionSignals(),
+      self: opensWithSentinel(safeJsonParse(row.first_user_part)?.text),
     }));
   } finally {
     db.close();
   }
+}
+
+function opensWithSentinel(text) {
+  return typeof text === "string" && text.startsWith(SELF_SESSION_SENTINEL);
 }
 
 export async function read(ref) {

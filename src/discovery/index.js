@@ -295,7 +295,9 @@ async function discoverDirect(adapter, { repo, config, cutoffMs, strict, stats, 
       stats.skipped += 1;
       continue;
     }
-    if (isSelfSession(transcript, { stateDir })) {
+    // A SQLite store has no per-session file to inspect; its adapter marks backpass's own
+    // sessions from the store itself (see ./self.js).
+    if (row.self || isSelfSession(transcript, { stateDir, readHead: !adapter.sqliteBacked })) {
       stats.self += 1;
       continue;
     }

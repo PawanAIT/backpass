@@ -3,13 +3,15 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { DatabaseSync } from "node:sqlite";
 
 /**
  * backpass's own analysis/synthesis calls are filed by each harness under this repo's
  * cwd, so discovery would pick them up as tier-1 sessions. These tests drive real
- * discovery over a fake HOME holding the three acpx-backed stores (pi, codex, claude),
- * each with one genuine session and one session whose first user message is an actual
- * prompt backpass rendered, and assert only the genuine ones come back.
+ * discovery over a fake HOME holding the acpx-backed stores (pi, codex, claude, and
+ * opencode's SQLite store), each with one genuine session and one session whose first
+ * user message is an actual prompt backpass rendered, and assert only the genuine ones
+ * come back.
  */
 const fakeHome = fs.mkdtempSync(path.join(os.tmpdir(), "backpass-self-home-"));
 process.env.HOME = fakeHome;
@@ -133,17 +135,80 @@ const piDir = path.join(fakeHome, ".pi", "agent", "sessions", `-${realRoot.repla
 const codexDir = path.join(fakeHome, ".codex", "sessions", "2026", "08", "20");
 const claudeDir = path.join(fakeHome, ".claude", "projects", realRoot.replace(/[/.]/g, "-"));
 
+/**
+ * opencode keeps every session in one SQLite store. The self session has the shape an
+ * `acpx opencode` call really records: a user message whose first text part is the
+ * rendered prompt. The store is small enough that its file head holds every session's
+ * text, so a genuine session must survive a self session sharing its database.
+ */
+function writeOpencodeStore(sessions) {
+  const store = path.join(fakeHome, ".local", "share", "opencode");
+  fs.mkdirSync(store, { recursive: true });
+  const db = new DatabaseSync(path.join(store, "opencode.db"));
+  db.exec(`
+    CREATE TABLE project (id TEXT PRIMARY KEY, worktree TEXT NOT NULL);
+    CREATE TABLE session (
+      id TEXT PRIMARY KEY, project_id TEXT NOT NULL, parent_id TEXT, directory TEXT NOT NULL,
+      title TEXT NOT NULL, time_created INTEGER NOT NULL, time_updated INTEGER NOT NULL
+    );
+    CREATE TABLE message (id TEXT PRIMARY KEY, session_id TEXT NOT NULL, time_created INTEGER NOT NULL, data TEXT NOT NULL);
+    CREATE TABLE part (
+      id TEXT PRIMARY KEY, message_id TEXT NOT NULL, session_id TEXT NOT NULL,
+      time_created INTEGER NOT NULL, data TEXT NOT NULL
+    );
+  `);
+  db.prepare("INSERT INTO project (id, worktree) VALUES (?, ?)").run("p1", realRoot);
+  const at = Date.parse("2026-08-20T10:00:00.000Z");
+  for (const { id, firstUserText } of sessions) {
+    db.prepare(
+      "INSERT INTO session (id, project_id, directory, title, time_created, time_updated) VALUES (?, 'p1', ?, ?, ?, ?)",
+    ).run(id, realRoot, id, at, at);
+    // An agent probe (`acpx opencode sessions new`) leaves a session with no messages at all.
+    if (firstUserText === null) continue;
+    const turns = [
+      { role: "user", parts: [{ type: "text", text: firstUserText }] },
+      { role: "assistant", parts: [{ type: "step-start" }, { type: "text", text: "{}" }] },
+    ];
+    turns.forEach((turn, index) => {
+      const messageId = `msg_${id}_${index}`;
+      db.prepare("INSERT INTO message (id, session_id, time_created, data) VALUES (?, ?, ?, ?)").run(
+        messageId,
+        id,
+        at + index,
+        JSON.stringify({ role: turn.role, time: { created: at + index } }),
+      );
+      turn.parts.forEach((part, partIndex) => {
+        db.prepare("INSERT INTO part (id, message_id, session_id, time_created, data) VALUES (?, ?, ?, ?, ?)").run(
+          `prt_${id}_${index}_${partIndex}`,
+          messageId,
+          id,
+          at + index,
+          JSON.stringify(part),
+        );
+      });
+    });
+  }
+  db.close();
+}
+
 writePiSession(piDir, "pi-real", "Add the changelog entry.");
 writePiSession(piDir, "pi-self", analysisPrompt);
 writeCodexSession(codexDir, "codex-real", "Fix the flaky test.");
 writeCodexSession(codexDir, "codex-self", synthesisPrompt);
 writeClaudeSession(claudeDir, "claude-real", "Open a PR for the parser fix.");
 writeClaudeSession(claudeDir, "claude-self", analysisPrompt);
+writeOpencodeStore([
+  { id: "ses_opencode_real", firstUserText: "Why does the release job skip the tag?" },
+  { id: "ses_opencode_self", firstUserText: synthesisPrompt },
+  { id: "ses_opencode_probe", firstUserText: null },
+]);
 // A genuine session that merely *talks about* the sentinel is not a self-session.
 writePiSession(piDir, "pi-mentions", `Why does backpass prepend ${SELF_SESSION_SENTINEL} to its prompts?`);
 
 function configFor() {
-  const config = loadConfig(realRoot, { discovery: { harnesses: ["pi", "codex", "claude"], since: "all" } });
+  const config = loadConfig(realRoot, {
+    discovery: { harnesses: ["pi", "codex", "claude", "opencode"], since: "all" },
+  });
   const cache = { version: 1, entries: {} };
   config.state = { readScanCache: () => cache, writeScanCache: () => {} };
   return config;
@@ -158,13 +223,16 @@ test("discovery excludes backpass-originated sessions from every acpx-backed har
   const { transcripts, perHarness } = await discoverTranscripts({ repo, config: configFor() });
 
   const ids = transcripts.map((t) => t.nativeId).sort();
-  assert.deepEqual(ids, ["claude-real", "codex-real", "pi-mentions", "pi-real"]);
+  assert.deepEqual(ids, ["claude-real", "codex-real", "pi-mentions", "pi-real", "ses_opencode_real"]);
   assert.equal(perHarness.pi.self, 1);
   assert.equal(perHarness.codex.self, 1);
   assert.equal(perHarness.claude.self, 1);
+  assert.equal(perHarness.opencode.self, 1);
+  assert.equal(perHarness.opencode.scanned, 2, "a probe's empty session is not listed at all");
   assert.equal(perHarness.pi.matched, 2);
   assert.equal(perHarness.codex.matched, 1);
   assert.equal(perHarness.claude.matched, 1);
+  assert.equal(perHarness.opencode.matched, 1);
   for (const t of transcripts) {
     assert.equal(t.association.tier, 1);
     assert.equal(t.identity, transcriptIdentity(t));
@@ -181,6 +249,7 @@ test("the exclusion survives the scan cache (a cached descriptor is still checke
     "codex-real",
     "pi-mentions",
     "pi-real",
+    "ses_opencode_real",
   ]);
   assert.equal(second.perHarness.pi.cached, 3);
   assert.equal(second.perHarness.pi.self, 1);
