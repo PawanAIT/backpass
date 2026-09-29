@@ -351,7 +351,10 @@ test("malformed OpenCode rows do not suppress valid sessions locally or remotely
             for (let scan = 0; scan < 2; scan++) {
               const local = await discoverTranscripts({ repo, config, harnesses: ["opencode"] });
               assert.equal(local.perHarness.opencode.error, null);
-              assert.deepEqual(local.transcripts.map((entry) => entry.nativeId), ["ses_opencode_real"]);
+              assert.deepEqual(
+                local.transcripts.map((entry) => entry.nativeId),
+                ["ses_opencode_real"],
+              );
               assert.equal(local.perHarness.opencode.self, 1);
               assert.equal(local.perHarness.opencode.scanned, remoteIds.length + 1);
             }
