@@ -258,7 +258,8 @@ export function isBlankOutput(text) {
  * (`"An empty array is a valid and useful answer"`), so blank output means the turn
  * never really ran - most often an upstream provider error (exhausted credits, a
  * suspended key) that an ACP bridge swallows without ever writing to stderr, sometimes a
- * passing provider hiccup. Call this from inside a `withFallthrough` callback, before
+ * turn that spent its whole output budget on reasoning or a passing provider error.
+ * Call this from inside a `withFallthrough` callback, before
  * the caller's own `extractJson` check, so `src/agents.js` owns retry and fallthrough
  * handling rather than treating the blank turn as malformed JSON.
  *

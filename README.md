@@ -752,7 +752,7 @@ durable verdicts are cached in
 are re-probed when their credential or auth-file state changes; `--force` re-probes every
 entry.
 The probe is a filter, not a promise: if the chosen harness answers `AUTH_REQUIRED` or rejects the model mid-run, backpass falls through to the next candidate and says so.
-A clean exit with no output at all can mean exhausted provider quota or credits, but also a transient provider hiccup, so backpass retries it once on the same candidate for that call.
+A clean exit with no output at all can mean exhausted provider quota or credits, but also a turn that spent its whole output budget on reasoning, which varies from attempt to attempt, or a transient provider error, so backpass retries it once on the same candidate for that call.
 A second blank demotes the candidate and falls through to the next one in the ladder, or stops the run if the agent is pinned.
 Model-turn timeouts never fall through, whether enforced by backpass or reported by acpx itself; in analysis, only that transcript fails and is retried next run, including with a pinned agent.
 A clean blank exit that consumed nearly the whole `--timeout` budget is also treated as a timeout, for compatibility with older acpx versions.
