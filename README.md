@@ -796,8 +796,6 @@ CLI flags on top:
     "since": "30d",
     "worktreeGlobs": [],
     "cloneRoots": [],
-    "hosts": [],
-    "opencodeStores": [],
     "minUserTurns": 2
   },
   "jobs": 4
