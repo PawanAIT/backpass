@@ -227,9 +227,9 @@ export function isBlankOutput(text) {
  * A call that exits clean but returns no text at all is a silent failure, not a
  * quality problem: the prompt contract always requires at least an empty JSON object
  * (`"An empty array is a valid and useful answer"`), so blank output means the turn
- * never really ran - most often an upstream provider error (exhausted credits, a
- * suspended key) that an ACP bridge swallows without ever writing to stderr, sometimes a
- * turn that spent its whole output budget on reasoning or a passing provider error.
+ * produced no usable answer. Possible causes include a turn that spent its whole
+ * output budget on reasoning or an upstream provider error (exhausted credits, a
+ * suspended key, or a transient failure) swallowed by an ACP bridge without stderr.
  * Call this from inside a `withFallthrough` callback, before
  * the caller's own `extractJson` check, so `src/agents.js` owns retry and fallthrough
  * handling rather than treating the blank turn as malformed JSON.
