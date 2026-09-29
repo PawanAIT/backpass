@@ -369,7 +369,6 @@ export async function analyzeTranscripts({
   alsoLoaded = "",
 }) {
   const state = config.state;
-  reclaimExpiredRawFiles(state.root);
   const pending = [];
   const summary = {
     total: transcripts.length,
