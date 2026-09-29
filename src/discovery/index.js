@@ -44,11 +44,11 @@ export function getAdapter(harness) {
  * results are memoised in `.backpass/scan-cache.json` keyed by path + mtime + size.
  * Only new or changed file headers need re-reading.
  *
- * SQLite-backed stores (opencode, hermes, cursor IDE) obtain descriptors with one
- * indexed query, bypassing the header cache, then read associated sessions to sign
- * their content independently of activity timestamps or association tier.
- * Both kinds of store use the separate
- * work-path cache in `associateByWork`; checkout ownership is recomputed each scan.
+ * Direct SQLite stores (opencode, hermes, cursor IDE) obtain descriptors with one
+ * indexed query, bypassing the header cache; Cursor CLI caches its file headers.
+ * Both discovery paths use the separate work-path cache in `associateByWork`;
+ * SQLite candidates are read once per scan to hash their events for that cache only.
+ * Transcript content signatures stay adapter-owned; checkout ownership is recomputed each scan.
  *
  * Every harness is fail-soft: a store that is missing, unreadable, or has drifted into
  * an unrecognised format produces a named warning and is skipped, never a failed run.
@@ -132,18 +132,8 @@ export async function discoverTranscripts({
               cacheDirty = true;
             },
           });
-      const signed = [];
-      for (const transcript of found) {
-        try {
-          if (adapter.sqliteBacked) await readSignedSqliteTranscript(transcript);
-          signed.push(transcript);
-        } catch (err) {
-          warn(`${adapter.name}: transcript unreadable for ${transcript.nativeId} (${err.message}) - session skipped`);
-          stats.skipped += 1;
-        }
-      }
       const worked = await associateByWork(adapter, pending, { work, stats, stateDir });
-      const unique = [...signed, ...worked].filter((transcript) => {
+      const unique = [...found, ...worked].filter((transcript) => {
         if (identities.has(transcript.identity)) return false;
         identities.add(transcript.identity);
         return true;
@@ -415,22 +405,11 @@ function discoverFiles(
   return { found: out, pending };
 }
 
-/** The same SQLite content key on every local association path, including Cursor CLI's file headers. */
-async function readSignedSqliteTranscript(transcript) {
-  const result = await readTranscript(transcript);
-  const content = crypto
-    .createHash("sha256")
-    .update(JSON.stringify([transcript.cwd, result.events]))
-    .digest("hex");
-  transcript.contentSignature ||= content;
-  return { ...result, content };
-}
-
 /**
  * Tier 2.5 for the sessions a scan handed back as candidates: read each one's work paths
  * (cached by content signature) and keep the ones whose work was in this repository.
  * SQLite timestamps need not advance when tool inputs change, so those candidates are
- * read once per scan and signed from their events before consulting the path cache.
+ * read once per scan and hashed from their events before consulting the path cache.
  * Always deterministic, so `--strict` keeps
  * them; backpass's own sessions are dropped as on every other tier.
  */
@@ -440,8 +419,13 @@ async function associateByWork(adapter, pending, { work, stats, stateDir }) {
     const draft = toTranscript(adapter, row, null, id);
     let paths;
     try {
-      const result = adapter.sqliteBacked ? await readSignedSqliteTranscript(draft) : null;
-      const content = result?.content || draft.contentSignature || `${draft.mtimeMs}:${draft.bytes}`;
+      const result = adapter.sqliteBacked ? await readTranscript(draft) : null;
+      const content = result
+        ? crypto
+            .createHash("sha256")
+            .update(JSON.stringify([draft.cwd, result.events]))
+            .digest("hex")
+        : draft.contentSignature || `${draft.mtimeMs}:${draft.bytes}`;
       const prior = work.entries[draft.identity];
       paths =
         prior?.version === WORK_PATHS_VERSION && prior.content === content && Array.isArray(prior.paths)
@@ -466,7 +450,7 @@ async function associateByWork(adapter, pending, { work, stats, stateDir }) {
       association.project = work.repo.root;
       association.projectRoot = work.repo.root;
     }
-    const transcript = toTranscript(adapter, { ...row, contentSignature: draft.contentSignature }, association, id);
+    const transcript = toTranscript(adapter, row, association, id);
     if (isSelfSession(transcript, { stateDir })) {
       stats.self += 1;
       continue;
