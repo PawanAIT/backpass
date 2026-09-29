@@ -99,6 +99,24 @@
     ],
     "session_message": [
       {
+        "id": "msg_probe_instruction",
+        "session_id": "ses_f1378472bffeProbeEmptySess1",
+        "type": "synthetic",
+        "seq": 0,
+        "time_created": 1790600150001,
+        "time_updated": 1790600150001,
+        "data": { "metadata": { "instruction": { "paths": ["/repo/demo/AGENTS.md"] } }, "text": "Instructions from: /repo/demo/AGENTS.md" }
+      },
+      {
+        "id": "msg_probe_system",
+        "session_id": "ses_f1378472bffeProbeEmptySess1",
+        "type": "system",
+        "seq": 1,
+        "time_created": 1790600150002,
+        "time_updated": 1790600150002,
+        "data": { "metadata": { "notice": "instructions" }, "text": "Instructions updated" }
+      },
+      {
         "id": "msg_0e84aacd7001parent00000000",
         "session_id": "ses_f17ca477affeM7vJpYuwLTunDK",
         "type": "synthetic",

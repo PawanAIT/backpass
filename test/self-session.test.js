@@ -334,6 +334,7 @@ test("OpenCode attachment openings followed by prompt quotes survive CLI scans a
 
     const { read } = await import("../src/discovery/adapters/opencode.js");
     assert.deepEqual((await read({ id })).events, [
+      { kind: "message", role: "user", text: "[Attachment-only user message]" },
       { kind: "message", role: "assistant", text: reply },
       { kind: "message", role: "user", text: quotedPrompt },
     ]);

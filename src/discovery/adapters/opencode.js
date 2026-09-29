@@ -37,10 +37,9 @@ import { openReadOnly, safeJsonParse } from "./sqlite.js";
  * store under the repo's cwd. There is no transcript file for `../self.js` to read, so
  * the listing reads the text of each session's first user message and the row is marked
  * `self` when it opens with the sentinel every backpass prompt starts with. Self
- * ancestry is propagated once per discovery, without the listing cutoff, so delegated
- * work cannot re-enter the corpus when its backpass-originated parent ages out of the
- * discovery window. A session with no messages at all, such as the one each agent probe
- * creates, is not listed.
+ * ancestry includes parents outside the listing cutoff, so delegated work cannot
+ * re-enter the corpus when its backpass-originated parent ages out of the discovery
+ * window. Unused probes, including 2.x sessions with only harness notices, are not listed.
  *
  * Besides the default store, a run reads each store named in the personal
  * `discovery.opencodeStores` (an OpenCode data directory or a database file) - a copy of
@@ -125,8 +124,8 @@ const V2_FIRST_USER_TEXT = `(SELECT CASE WHEN json_valid(m.data) THEN json_extra
     LIMIT 1)`;
 
 /**
- * Discovery is direct: one query per layout and store lists every session with its
- * directory, and the caller applies the shared association tiers.
+ * Discovery queries each layout and store for sessions inside the cutoff, then reads
+ * any missing ancestors for self detection. The caller applies shared association tiers.
  *
  * @param {{ cutoffMs?: number | null, config?: object, warn?: (message: string) => void }} [options]
  */
@@ -165,7 +164,19 @@ async function discoverStore(file, cutoffMs, { legacyFallback = false } = {}) {
     const v2 = hasTables(db, "session_v2", "session_message");
     const v1 = hasTables(db, "session");
     if (!v2 && !v1) throw new Error("no session or session_v2 table (unrecognised opencode store)");
-    const sessions = [...(v2 ? listV2(db) : []), ...(v1 ? listV1(db, { skipV2: v2 }) : [])];
+    const list = (options) => [
+      ...(v2 ? listV2(db, options) : []),
+      ...(v1 ? listV1(db, { ...options, skipV2: v2 }) : []),
+    ];
+    const sessions = list({ cutoffMs });
+    // Only ancestors of candidates need out-of-window reads. Visit each once,
+    // including empty intermediates; missing parents and cycles terminate too.
+    const visited = new Set(sessions.map((session) => session.id));
+    for (const session of sessions) {
+      if (!session.parentId || visited.has(session.parentId)) continue;
+      visited.add(session.parentId);
+      sessions.push(...list({ sessionId: session.parentId }));
+    }
     const self = selfSessions(sessions);
     return sessions
       .filter((session) => session.recorded && (cutoffMs == null || session.mtimeMs >= cutoffMs))
@@ -202,7 +213,7 @@ function opensWithSentinel(text) {
   return typeof text === "string" && text.startsWith(SELF_SESSION_SENTINEL);
 }
 
-function listV1(db, { skipV2 }) {
+function listV1(db, { skipV2, cutoffMs = null, sessionId = null }) {
   const parentSelect = tableHasColumn(db, "session", "parent_id") ? ", s.parent_id AS parent_id" : "";
   const firstUserSelect = hasTables(db, "message", "part") ? `, ${V1_FIRST_USER_PART} AS first_user_part` : "";
   // Unused probes have no messages; attachment conversations need not have user text.
@@ -214,9 +225,10 @@ function listV1(db, { skipV2 }) {
               p.worktree AS worktree, ${recordedSelect} AS recorded${parentSelect}${firstUserSelect}
          FROM session s
          LEFT JOIN project p ON p.id = s.project_id
-        ${skipV2 ? "WHERE s.id NOT IN (SELECT id FROM session_v2)" : ""}`,
+        WHERE ${skipV2 ? "s.id NOT IN (SELECT id FROM session_v2) AND" : ""}
+          ${sessionId != null ? "s.id = ?" : cutoffMs != null ? "COALESCE(NULLIF(s.time_updated, 0), s.time_created, 0) >= ?" : "1"}`,
     )
-    .all();
+    .all(...(sessionId != null ? [sessionId] : cutoffMs != null ? [cutoffMs] : []));
   return rows.map((row) => ({
     ...row,
     layout: "v1",
@@ -226,22 +238,34 @@ function listV1(db, { skipV2 }) {
   }));
 }
 
-function listV2(db) {
+function listV2(db, { cutoffMs = null, sessionId = null }) {
+  // Message timestamps, not just session timestamps, admit resumed sessions.
+  // Find recent message activity once rather than taking a per-session MAX over
+  // the entire history before deciding which sessions need metadata and text.
+  const filter =
+    sessionId != null
+      ? "s.id = $sessionId"
+      : cutoffMs != null
+        ? `(s.time_updated >= $cutoff OR s.time_created >= $cutoff OR s.id IN
+          (SELECT session_id FROM session_message WHERE time_updated >= $cutoff))`
+        : "1";
   const rows = db
     .prepare(
       `SELECT s.id AS id, s.directory AS directory, s.title AS title, s.parent_id AS parent_id,
               s.time_created AS time_created, s.time_updated AS time_updated,
               p.worktree AS worktree,
+              EXISTS (SELECT 1 FROM session_message m WHERE m.session_id = s.id
+                      AND m.type IN ('user', 'assistant', 'shell', 'skill')) AS recorded,
               (SELECT MAX(m.time_updated) FROM session_message m WHERE m.session_id = s.id) AS message_time,
               ${V2_FIRST_USER_TEXT} AS first_user_text
          FROM session_v2 s
-         LEFT JOIN project p ON p.id = s.project_id`,
+         LEFT JOIN project p ON p.id = s.project_id
+        WHERE ${filter}`,
     )
-    .all();
+    .all(...(sessionId != null ? [{ sessionId }] : cutoffMs != null ? [{ cutoff: cutoffMs }] : []));
   return rows.map((row) => ({
     ...row,
     layout: "v2",
-    recorded: row.message_time !== null,
     parentId: row.parent_id || null,
     mtimeMs: Math.max(Number(row.time_updated) || 0, Number(row.message_time) || 0) || Number(row.time_created) || 0,
     firstUserText: row.first_user_text,
@@ -273,8 +297,9 @@ function sessionRow(session, file, self) {
 /** A session is read from the database discovery listed it in. */
 export async function read(ref) {
   if (ref.extra?.legacy) return legacyRead();
-  const db = await openReadOnly(ref.path || dbPath());
-  if (!db) return legacyRead();
+  const file = ref.path || dbPath();
+  const db = await openReadOnly(file);
+  if (!db) throw new Error(`opencode store ${file} not found`);
 
   try {
     const sessionId = ref.extra?.sessionId || ref.id;
@@ -314,10 +339,13 @@ function readV1(db, sessionId) {
     model = model || data.modelID || data.model?.modelID || null;
 
     const texts = [];
+    let hasFiles = false;
     for (const part of partsByMessage.get(message.id) || []) {
       if (!part) continue;
       if (part.type === "text" && part.text) {
         texts.push(part.text);
+      } else if (part.type === "file") {
+        hasFiles = true;
       } else if (part.type === "tool") {
         events.push({
           kind: "tool",
@@ -327,7 +355,11 @@ function readV1(db, sessionId) {
           status: part.state?.status,
         });
       }
-      // reasoning / step-start / step-finish / patch / file parts carry no loss signal.
+      // reasoning / step-start / step-finish / patch parts carry no loss signal.
+    }
+    if (role === "user" && hasFiles && !texts.join("\n").trim()) {
+      texts.length = 0;
+      texts.push("[Attachment-only user message]");
     }
     if (texts.length) events.push({ kind: "message", role, text: texts.join("\n") });
   }
@@ -364,6 +396,8 @@ function readV2(db, sessionId) {
       case "user":
         if (typeof data.text === "string" && data.text.trim()) {
           events.push({ kind: "message", role: "user", text: data.text });
+        } else if (Array.isArray(data.files) && data.files.length) {
+          events.push({ kind: "message", role: "user", text: "[Attachment-only user message]" });
         }
         break;
       case "assistant": {
