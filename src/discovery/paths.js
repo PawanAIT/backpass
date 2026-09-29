@@ -1,12 +1,11 @@
 /**
  * Recorded paths, read on the machine backpass runs on.
  *
- * A harness records paths in the spelling of the system it ran on. On a POSIX host a
- * Windows drive path (`C:\work\repo`, `C:/work/repo`) or a UNC path (`\\server\share`,
- * or `//server/share` as Windows tools write it with forward slashes) is not absolute,
- * so `path.resolve` quietly turns it into a location under the process cwd - which is
- * inside the very repository backpass was started from. That made every such session a
- * tier-1 match for whichever repo ran the scan (issue #164).
+ * A harness records paths in the spelling of the system it ran on. On POSIX, drive
+ * paths (`C:\work\repo`, `C:/work/repo`) and backslash UNC paths (`\\server\share`)
+ * resolve under the process cwd, risking false association with the current repo.
+ * Forward-slash UNC paths (`//server/share`) are absolute on POSIX but resolve as local
+ * paths rather than Windows network shares, so they must also be refused.
  *
  * Every reader that resolves a recorded path - association, user-scope project keys, and
  * nested-file attribution - goes through `localPath` first, so a path that names no place
