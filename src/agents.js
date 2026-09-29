@@ -513,9 +513,9 @@ export class AgentResolver {
    * unchanged for pinned and auto-picked agents alike: it is never classified (whatever its stderr
    * says), demoted, or retried.
    *
-   * A blank turn is retried once on the same candidate first. One blank turn is as often a passing
-   * provider hiccup as exhausted credits, and only a second one tells them apart; without the retry a
-   * hiccup demotes a working candidate for later runs too, or stops a pinned run hours in.
+   * A blank turn gets one retry per candidate per invocation before normal failure handling.
+   * This tolerates a transient provider hiccup without caching a negative verdict or stopping a
+   * pinned run, while repeated blanks still fail quickly when credits are exhausted.
    */
   async withFallthrough(role, fn) {
     const retriedBlank = new Set();
