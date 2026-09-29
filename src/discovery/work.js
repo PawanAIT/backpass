@@ -17,17 +17,11 @@ import { isWindowsPath, localPath } from "./paths.js";
  * session's cwd and read through `localPath`. Nothing is read out of shell command text,
  * and a `~` path, whose home is unknown, is not placed.
  *
- * Tier 2.5 - deterministic, work paths. A session that started in no checkout at all - a
- * home directory, a scratch folder, an orchestrator's working folder - has no repository
- * of its own, so tiers 1 to 3 cannot place it. Its work paths can: each is placed in the
- * checkout it lies in (the nearest directory holding `.git`), and the session belongs to
- * this repository when the paths in this repository's checkouts outnumber the paths in
- * every other checkout together. Paths in no checkout (temp files, config, notes) are
- * not counted either way. A checkout is this repository's when it is one of its
- * worktrees or sibling clones, or when it shares a git remote with it. A majority can
- * hold for one repository only, so a session is never claimed twice; a session that
- * started inside some checkout, or recorded another repository's remote, belongs to that
- * one and never reaches this tier.
+ * See README.md's association tiers for tier-2.5 eligibility and majority rules.
+ * Discovery calls this only after all descriptor-based tiers failed, including tier 3.
+ * Candidate checks must reject both cwd and recorded-root checkout ownership, and any
+ * recorded remote, so tool paths cannot override a session's existing repository tie.
+ * Checkout lookup follows symlinks and the nearest `.git`, not lexical path containment.
  */
 
 /** Tool-input fields that name a file or directory a session worked in. */

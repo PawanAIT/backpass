@@ -129,9 +129,10 @@ export function associate(descriptor, repo, options = {}) {
 /**
  * Association for a session that ran on another machine (design section 6.5).
  *
- * The tier rules are the local ones, applied to facts computed where the paths are real
+ * Descriptor-based tiers use facts computed where the paths are real
  * (`src/discovery/remote/git-facts.js`): whether the cwd still exists over there, which
- * checkout it sits in, and that checkout's git remotes. What changes is the ceiling.
+ * checkout it sits in, and that checkout's git remotes. For the user-facing rules and
+ * local-only tiers, see README.md's Collect samples section.
  * Tier 1 means "this clone", and nothing on another host is this clone, so a remote
  * session is never tier 1 - it reaches tier 1.5 by sharing a remote with this repo,
  * which is the same bar a sibling clone clears here. That also means a second checkout

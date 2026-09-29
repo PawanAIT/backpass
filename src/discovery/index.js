@@ -41,11 +41,11 @@ export function getAdapter(harness) {
  *
  * For file-backed stores the expensive step is reading each transcript's header, so
  * results are memoised in `.backpass/scan-cache.json` keyed by path + mtime + size.
- * Re-scans are then O(new files) - which matters: codex alone had 10,317 rollouts on
- * the machine this was designed against.
+ * Only new or changed file headers need re-reading.
  *
- * SQLite-backed stores (opencode, hermes, cursor IDE) answer the same question with one
- * indexed query, so they skip the cache entirely.
+ * SQLite-backed stores (opencode, hermes, cursor IDE) obtain descriptors with one
+ * indexed query, bypassing the header cache. Both kinds of store use the separate
+ * work-path cache in `associateByWork`; checkout ownership is recomputed each scan.
  *
  * Every harness is fail-soft: a store that is missing, unreadable, or has drifted into
  * an unrecognised format produces a named warning and is skipped, never a failed run.
@@ -55,9 +55,10 @@ export function getAdapter(harness) {
  * `perHarness[h].self` - see `./self.js`.
  *
  * Configured ssh hosts (`./hosts.js`) are collected after the local harnesses and join
- * the same corpus: same tiers, same sample, same cap. They have no tier of their own and
- * no budget of their own. A session that exists on two machines - a synced or copied
- * store - is kept once, or one session would satisfy `minGapEvidence` by itself.
+ * the same corpus, sample and cap. Remote association is handled by `associateRemote`
+ * in `./association.js`, not the local work-path pass. Hosts have no budget of their own.
+ * A session that exists on two machines - a synced or copied store - is kept once, or
+ * one session would satisfy `minGapEvidence` by itself.
  */
 export async function discoverTranscripts({
   repo,

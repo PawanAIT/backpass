@@ -158,18 +158,14 @@ so a password prompt fails the host instead of hanging the run) and pipes a one-
 program holding its own adapters into `node -` over there. That program lists the
 sessions in the window, computes the filesystem and git facts about each session's cwd -
 which is the only place those paths are real - and exits, removing its temp directory.
-Association then runs here, with the same tiers, against those facts. Only the sessions
-that are associated, sampled, and not already analyzed are fetched: the raw transcript
-file for file-backed stores, so the analysis agent's raw-transcript escape hatch still
-opens a real file, and the adapter's normalized events for SQLite stores. Fetched copies
-are cached under the run's state directory (mode 0700) and pruned after 30 days unused;
-`backpass status` lists them per host.
+Association then runs here against those facts.
+Only the sessions that are associated, sampled, and not already analyzed are fetched: the raw transcript file for file-backed stores, so the analysis agent's raw-transcript escape hatch still opens a real file, and the adapter's normalized events for SQLite stores.
+Fetched copies are cached under the run's state directory (mode 0700) and pruned after 30 days unused; `backpass status` lists them per host.
 
-Remote tiers are the local ones with a lower ceiling. Nothing on another machine is
-tier 1 ("this clone"); a live remote checkout sharing a git remote with this repo is
-tier 1.5, a recorded remote is tier 2, and a dead path is tier 3. A session that exists
-on two machines is kept once, local copy first. Evidence labels carry the host, so
-cross-machine corroboration is visible in the apply surface.
+For the association rules and local-only tiers, see [Collect samples](#1-collect-samples---which-sessions-belong-to-this-repo).
+A live remote checkout sharing a git remote with this repo reaches tier 1.5, never tier 1 ("this clone").
+A session that exists on two machines is kept once, local copy first.
+Evidence labels carry the host, so cross-machine corroboration is visible in the apply surface.
 
 Every host is fail-soft and named: an unreachable machine, a key that needs a prompt, an
 unknown or changed host key, no Node, a Node below 22.5 (file-backed harnesses still
@@ -254,16 +250,12 @@ Association runs in five tiers:
 3. **Tier 2 - deterministic, survives deletion.** A git remote recorded in the transcript
    matches one of the repo's remotes. This is how codex and grok stay attributable long
    after the worktree is gone.
-4. **Tier 2.5 - deterministic, work paths.** The session started in a live directory that
-   is no checkout at all (a home directory, a scratch folder, an orchestrator's working
-   folder), and its tool calls worked here: of the structured paths they name (the same
-   ones that place work for nested memory files), those in this repo's checkouts outnumber
-   those in every other checkout together. Paths in no checkout count for neither side,
-   and a checkout sharing a git remote with this repo counts as this repo. A majority can
-   hold for one repo only, so no session is claimed twice, and a session that started
-   inside any checkout, or recorded another repo's remote, is never placed this way. Each
-   such session is read once to find its paths, which are cached by content in
-   `.backpass/scan-cache.json`; sessions collected over SSH are not placed this way.
+4. **Tier 2.5 - deterministic, work paths.** In project scope, this tier runs only when no other tier matched, including tier 3.
+   The session must have started in a live directory outside every checkout (a home directory, a scratch folder, an orchestrator's working folder), with no recorded remote and no recorded git root inside a checkout.
+   Of the distinct resolved structured tool-call paths (the same ones that place work for [nested memory files](#10-nested-memory-files-in-a-monorepo)), those in this repo's checkouts must outnumber those in every other checkout together.
+   Paths in no checkout count for neither side, and a checkout sharing a git remote with this repo counts as this repo.
+   A majority can hold for one repo only, so no session is claimed twice.
+   Sessions collected over SSH are not placed this way.
    `--strict` keeps this tier.
 5. **Tier 3 - best-effort.** A dead path whose last segment is the repo's directory name,
    or one matching a glob you configured. Labelled as such, and excluded by `--strict`.
@@ -275,11 +267,12 @@ A drive without a drive-root mount, another distro, or a network share remains e
 In user scope, when a cwd has no local mapping and no recorded remote supplies a project key, it remains a tier-3 key in its original spelling, never resolved against the process cwd, and `--strict` excludes it.
 Windows hosts retain native path handling.
 
-Configured SSH hosts are collected after the local stores and join the same corpus, with
-the same tiers, sample and cap - see [Your other machines](#your-other-machines).
+Configured SSH hosts are collected after the local stores and join the same corpus, sample and cap - see [Your other machines](#your-other-machines).
 
-Collection is incremental. Codex alone can hold 10,000+ rollouts, so verdicts are cached in
-`.backpass/scan-cache.json` by path, mtime and size - re-scans cost only the new files.
+Collection is incremental.
+Codex alone can hold 10,000+ rollouts, so file-store headers are cached in `.backpass/scan-cache.json` by path, mtime and size; new or changed files are re-read.
+Tier-2.5 candidates from file and SQLite stores are read once for their work paths, cached in the same file by transcript identity, content signature and resolver version.
+Re-scans reuse those paths but check their checkout ownership against the live filesystem again.
 A harness whose store is missing or has drifted into an unrecognised shape produces a
 warning and is skipped; the run continues. backpass's own loss and gradient-descent calls land
 in these same stores under the repo's cwd; every prompt it sends is tagged, and tagged
@@ -869,7 +862,7 @@ exclude (`.git/info/exclude`, written by `backpass init`) rather than the tracke
 
 ```
 .backpass/
-  scan-cache.json        collect-samples verdicts by path + mtime + size
+  scan-cache.json        discovery cache (see Collect samples)
   evidence/<identity>.json per-transcript loss
   evidence-summary.json  aggregated gradients
   proposal.json          the latest parseable gradient-descent step (absent if none was produced)
