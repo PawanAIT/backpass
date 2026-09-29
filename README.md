@@ -257,6 +257,11 @@ Association runs in four tiers:
 4. **Tier 3 - best-effort.** A dead path whose last segment is the repo's directory name,
    or one matching a glob you configured. Labelled as such, and excluded by `--strict`.
 
+A path a harness recorded on Windows (`C:\work\repo`, or a UNC path such as
+`\\server\share\repo`) names no place on a macOS or Linux host, so it matches none of the
+path tiers there and never places work for a nested memory file; a recorded remote still
+associates the session at tier 2.
+
 Configured SSH hosts are collected after the local stores and join the same corpus, with
 the same tiers, sample and cap - see [Your other machines](#your-other-machines).
 
