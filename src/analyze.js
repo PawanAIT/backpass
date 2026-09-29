@@ -32,6 +32,16 @@ let callCounter = 0;
 const seenNotes = new Set();
 const activeRawFiles = new Set();
 
+/**
+ * A raw file is leased rather than owned by a PID: while its call runs, this process renews
+ * the file's modification time every RAW_LEASE_RENEW_MS, so a file older than RAW_LEASE_MS
+ * belongs to no running analysis, whatever process, PID namespace, or host wrote it.
+ */
+const RAW_LEASE_RENEW_MS = 60_000;
+const RAW_LEASE_MS = 15 * 60_000;
+const RAW_FILE_NAME = /^[0-9a-f-]{36}\.jsonl$/;
+let leaseTimer = null;
+
 process.once("exit", () => {
   for (const file of activeRawFiles) {
     try {
@@ -41,6 +51,63 @@ process.once("exit", () => {
     }
   }
 });
+
+function renewRawLeases() {
+  const now = new Date();
+  for (const file of activeRawFiles) {
+    try {
+      fs.utimesSync(file, now, now);
+    } catch {
+      // Not written yet, or already removed; either way there is no lease to renew.
+    }
+  }
+}
+
+function holdRawFile(file) {
+  activeRawFiles.add(file);
+  if (!leaseTimer) {
+    leaseTimer = setInterval(renewRawLeases, RAW_LEASE_RENEW_MS);
+    leaseTimer.unref();
+  }
+}
+
+function releaseRawFile(file) {
+  activeRawFiles.delete(file);
+  if (!activeRawFiles.size && leaseTimer) {
+    clearInterval(leaseTimer);
+    leaseTimer = null;
+  }
+  fs.rmSync(file, { force: true });
+}
+
+/**
+ * Removes raw files whose lease expired - what an uncatchable exit such as SIGKILL leaves
+ * behind - from the state root and its nested state directories.
+ */
+export function reclaimExpiredRawFiles(stateRoot) {
+  if (!stateRoot) return;
+  const now = Date.now();
+  const roots = [stateRoot];
+  const nested = path.join(stateRoot, "nested");
+  if (fs.existsSync(nested) && fs.lstatSync(nested).isDirectory()) {
+    for (const entry of fs.readdirSync(nested, { withFileTypes: true })) {
+      if (entry.isDirectory()) roots.push(path.join(nested, entry.name));
+    }
+  }
+  for (const root of roots) {
+    const dir = path.resolve(root, "raw");
+    if (!fs.existsSync(dir) || !fs.lstatSync(dir).isDirectory()) continue;
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+      const file = path.join(dir, entry.name);
+      if (!entry.isFile() || !RAW_FILE_NAME.test(entry.name)) continue;
+      try {
+        if (now - fs.statSync(file).mtimeMs > RAW_LEASE_MS) fs.rmSync(file, { force: true });
+      } catch {
+        // Removed by its own run in the meantime.
+      }
+    }
+  }
+}
 
 /** The same adapter limitation would repeat once per transcript; say it once per run. */
 function noteOnce(note) {
@@ -163,7 +230,7 @@ function promptPathFor(state, transcript) {
  */
 function sessionRawPath(transcript, state) {
   if (transcript.host || !getAdapter(transcript.harness)?.sqliteBacked || !state?.root) return null;
-  return path.resolve(state.root, "raw", `${process.pid}-${randomUUID()}.jsonl`);
+  return path.resolve(state.root, "raw", `${randomUUID()}.jsonl`);
 }
 
 async function analyzeOne({
@@ -217,7 +284,7 @@ async function analyzeOne({
         JSON.stringify({ harness: transcript.harness, session: transcript.nativeId, model: raw.model || null }),
         ...raw.events.map((event) => JSON.stringify(event)),
       ];
-      activeRawFiles.add(rawFile);
+      holdRawFile(rawFile);
       fs.writeFileSync(rawFile, `${lines.join("\n")}\n`, { mode: 0o600, flag: "wx" });
     }
 
@@ -265,10 +332,7 @@ async function analyzeOne({
       distilled,
     };
   } finally {
-    if (rawFile) {
-      fs.rmSync(rawFile, { force: true });
-      activeRawFiles.delete(rawFile);
-    }
+    if (rawFile) releaseRawFile(rawFile);
   }
 }
 

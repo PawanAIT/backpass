@@ -8,7 +8,7 @@ import { spawnSync } from "node:child_process";
 import { DatabaseSync } from "node:sqlite";
 import { randomUUID } from "node:crypto";
 
-import { analyzeTranscripts } from "../src/analyze.js";
+import { analyzeTranscripts, reclaimExpiredRawFiles } from "../src/analyze.js";
 import { State } from "../src/state.js";
 
 /**
@@ -24,6 +24,8 @@ import { State } from "../src/state.js";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const CLI = path.join(ROOT, "bin", "backpass.js");
+/** Older than the 15-minute raw-file lease in src/analyze.js. */
+const RAW_LEASE_EXPIRED_MS = 16 * 60_000;
 
 const binDir = fs.mkdtempSync(path.join(os.tmpdir(), "backpass-sqlite-raw-bin-"));
 const fakePi = path.join(binDir, "pi");
@@ -211,7 +213,7 @@ test("a SQLite session's escape hatch is a file of its own events, removed after
 for (const signal of ["SIGINT", "SIGTERM", "SIGKILL"]) {
   for (const nested of [false, true]) {
     test(
-      `a SQLite raw file is ${signal === "SIGKILL" ? "retained" : "removed"} when ${nested ? "nested" : "root"} analysis receives ${signal}`,
+      `a SQLite raw file is removed ${signal === "SIGKILL" ? "once its lease runs out" : "at exit"} when ${nested ? "nested" : "root"} analysis receives ${signal}`,
       { skip: process.platform === "win32" },
       () => {
         const home = fs.mkdtempSync(path.join(os.tmpdir(), "backpass-sqlite-raw-home-"));
@@ -241,58 +243,78 @@ for (const signal of ["SIGINT", "SIGTERM", "SIGKILL"]) {
         assert.equal(seen.rawPath.includes(path.join(".backpass", "nested")), nested);
         if (signal === "SIGKILL") {
           assert.equal(fs.existsSync(seen.rawPath), true, "SIGKILL cannot run exit cleanup");
-          const activeFile = path.join(path.dirname(seen.rawPath), `${process.pid}-${randomUUID()}.jsonl`);
-          fs.writeFileSync(activeFile, "live analysis events\n", { mode: 0o600 });
-          fs.utimesSync(activeFile, new Date(0), new Date(0));
+          const liveFile = path.join(path.dirname(seen.rawPath), `${randomUUID()}.jsonl`);
+          fs.writeFileSync(liveFile, "live analysis events\n", { mode: 0o600 });
           fs.rmSync(database);
+          const early = analyze(dir, home);
+          assert.equal(early.status, 0, `${early.stdout}${early.stderr}`);
+          assert.equal(fs.existsSync(seen.rawPath), true, "a lease that has not run out is left alone");
+          const expired = new Date(Date.now() - RAW_LEASE_EXPIRED_MS);
+          fs.utimesSync(seen.rawPath, expired, expired);
           const recovered = analyze(dir, home);
           assert.equal(recovered.status, 0, `${recovered.stdout}${recovered.stderr}`);
           assert.equal(JSON.parse(recovered.stdout).summary, null);
-          assert.equal(fs.readFileSync(activeFile, "utf8"), "live analysis events\n");
+          assert.equal(fs.readFileSync(liveFile, "utf8"), "live analysis events\n");
         }
-        assert.equal(fs.existsSync(seen.rawPath), signal === "SIGKILL", "only catchable exits can clean up safely");
+        assert.equal(fs.existsSync(seen.rawPath), false);
       },
     );
   }
 }
 
-test("cached analysis leaves other runs' raw files alone", { skip: process.platform === "win32" }, () => {
-  const home = fs.mkdtempSync(path.join(os.tmpdir(), "backpass-sqlite-raw-home-"));
-  const dir = initRepo();
-  writeStore(home, dir);
-  const initial = analyze(dir, home);
-  assert.equal(initial.status, 0, `${initial.stdout}${initial.stderr}`);
-  const killed = analyze(dir, home, { RAW_TEST_SIGNAL: "SIGKILL" }, ["--force"]);
-  assert.equal(killed.signal, "SIGKILL", `${killed.stdout}${killed.stderr}`);
-  const seen = JSON.parse(fs.readFileSync(seenLog, "utf8"));
-  assert.equal(fs.existsSync(seen.rawPath), true);
-  fs.rmSync(seenLog);
-  const cached = analyze(dir, home);
-  assert.equal(cached.status, 0, `${cached.stdout}${cached.stderr}`);
-  assert.equal(JSON.parse(cached.stdout).summary.cached, 1);
-  assert.equal(fs.existsSync(seenLog), false, "a cache hit must not require another model call");
-  assert.equal(fs.existsSync(seen.rawPath), true);
-});
+test(
+  "cached analysis reclaims another run's raw file only once its lease runs out",
+  {
+    skip: process.platform === "win32",
+  },
+  () => {
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), "backpass-sqlite-raw-home-"));
+    const dir = initRepo();
+    writeStore(home, dir);
+    const initial = analyze(dir, home);
+    assert.equal(initial.status, 0, `${initial.stdout}${initial.stderr}`);
+    const killed = analyze(dir, home, { RAW_TEST_SIGNAL: "SIGKILL" }, ["--force"]);
+    assert.equal(killed.signal, "SIGKILL", `${killed.stdout}${killed.stderr}`);
+    const seen = JSON.parse(fs.readFileSync(seenLog, "utf8"));
+    assert.equal(fs.existsSync(seen.rawPath), true);
+    fs.rmSync(seenLog);
+    const cached = analyze(dir, home);
+    assert.equal(cached.status, 0, `${cached.stdout}${cached.stderr}`);
+    assert.equal(JSON.parse(cached.stdout).summary.cached, 1);
+    assert.equal(fs.existsSync(seenLog), false, "a cache hit must not require another model call");
+    assert.equal(fs.existsSync(seen.rawPath), true);
+    const expired = new Date(Date.now() - RAW_LEASE_EXPIRED_MS);
+    fs.utimesSync(seen.rawPath, expired, expired);
+    const later = analyze(dir, home);
+    assert.equal(later.status, 0, `${later.stdout}${later.stderr}`);
+    assert.equal(JSON.parse(later.stdout).summary.cached, 1);
+    assert.equal(fs.existsSync(seen.rawPath), false);
+  },
+);
 
-test("analysis preserves another namespace's root and nested raw files with the same PID", () => {
+test("analysis keeps live root and nested raw files and reclaims expired leases", () => {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), "backpass-sqlite-raw-home-"));
   const dir = initRepo();
-  const preload = path.join(binDir, "shared-pid.mjs");
-  const liveLog = path.join(binDir, "live-files.json");
+  const preload = path.join(binDir, "raw-leases.mjs");
+  const filesLog = path.join(binDir, "raw-files.json");
   fs.writeFileSync(
     preload,
     `import fs from "node:fs";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 if (process.argv[1] === ${JSON.stringify(CLI)}) {
-  const files = ["raw", "nested/previous/raw"].map((subdir) => {
+  const files = ["raw", "nested/previous/raw"].flatMap((subdir) => {
     const rawDir = path.join(process.cwd(), ".backpass", subdir);
     fs.mkdirSync(rawDir, { recursive: true });
-    const file = path.join(rawDir, process.pid + "-" + randomUUID() + ".jsonl");
-    fs.writeFileSync(file, "live analysis events\\n", { mode: 0o600 });
-    return file;
+    return [0, ${RAW_LEASE_EXPIRED_MS}].map((age) => {
+      const file = path.join(rawDir, randomUUID() + ".jsonl");
+      fs.writeFileSync(file, "analysis events\\n", { mode: 0o600 });
+      const at = new Date(Date.now() - age);
+      fs.utimesSync(file, at, at);
+      return { file, expired: age > 0 };
+    });
   });
-  fs.writeFileSync(${JSON.stringify(liveLog)}, JSON.stringify(files));
+  fs.writeFileSync(${JSON.stringify(filesLog)}, JSON.stringify(files));
 }
 `,
   );
@@ -301,16 +323,53 @@ if (process.argv[1] === ${JSON.stringify(CLI)}) {
   });
   assert.equal(result.status, 0, `${result.stdout}${result.stderr}`);
   assert.equal(JSON.parse(result.stdout).summary, null);
-  const files = JSON.parse(fs.readFileSync(liveLog, "utf8"));
-  assert.equal(files.length, 2);
-  for (const file of files) {
-    assert.equal(fs.existsSync(file), true, `same-PID analysis deleted ${file}`);
-    assert.equal(fs.readFileSync(file, "utf8"), "live analysis events\n");
+  const files = JSON.parse(fs.readFileSync(filesLog, "utf8"));
+  assert.equal(files.length, 4);
+  for (const { file, expired } of files) {
+    assert.equal(fs.existsSync(file), !expired, `${expired ? "kept expired" : "deleted live"} ${file}`);
   }
 });
 
+test("a running call renews its raw file's lease", async (t) => {
+  t.mock.timers.enable({ apis: ["setInterval"] });
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "backpass-sqlite-raw-home-"));
+  const dir = initRepo();
+  const database = writeStore(home, dir);
+  t.mock.method(os, "homedir", () => home);
+  const stateDir = path.join(dir, ".backpass");
+  const state = new State(dir, { stateDir: path.relative(process.cwd(), stateDir), exclude: false }).ensure();
+  let file = "";
+  let age = Infinity;
+  const summary = await analyzeTranscripts({
+    transcripts: [{ harness: "opencode", id: "ses_here", nativeId: "ses_here", path: database }],
+    memoryFile: { path: "AGENTS.md", units: [] },
+    memoryHash: "test-memory",
+    repo: { root: dir },
+    config: {
+      state,
+      jobs: 1,
+      discovery: { minUserTurns: 2 },
+      agents: {
+        resolve: async () => ({ agent: "pi" }),
+        withFallthrough: async () => {
+          const [name] = fs.readdirSync(path.join(stateDir, "raw"));
+          file = path.join(stateDir, "raw", name);
+          const expired = new Date(Date.now() - RAW_LEASE_EXPIRED_MS);
+          fs.utimesSync(file, expired, expired);
+          t.mock.timers.tick(60_000);
+          age = Date.now() - fs.statSync(file).mtimeMs;
+          return { text: JSON.stringify({ positive: [], negative: [], gaps: [] }) };
+        },
+      },
+    },
+  });
+  assert.equal(summary.analyzed, 1);
+  assert.ok(age < 10_000, `the lease was last renewed ${age}ms ago`);
+  assert.equal(fs.existsSync(file), false);
+});
+
 for (const nested of [false, true]) {
-  test(`concurrent analysis preserves this process's active ${nested ? "nested" : "root"} raw file`, async (t) => {
+  test(`reclamation preserves this process's active ${nested ? "nested" : "root"} raw file`, async (t) => {
     const home = fs.mkdtempSync(path.join(os.tmpdir(), "backpass-sqlite-raw-home-"));
     const dir = initRepo();
     const database = writeStore(home, dir);
@@ -336,14 +395,12 @@ for (const nested of [false, true]) {
             activeFile = path.join(stateDir, "raw", files[0]);
             const before = fs.readFileSync(activeFile, "utf8");
             for (const root of [rootStateDir, stateDir, state.root]) {
-              const concurrent = await analyzeTranscripts({
-                transcripts: [],
-                memoryFile: { path: "AGENTS.md", units: [] },
-                memoryHash: "test-memory",
-                repo: { root: dir },
-                config: { state: new State(dir, { stateDir: root, exclude: false }), jobs: 1 },
-              });
-              assert.equal(concurrent.total, 0);
+              const expiredFile = path.join(stateDir, "raw", `${randomUUID()}.jsonl`);
+              fs.writeFileSync(expiredFile, "expired analysis events\n");
+              const expired = new Date(Date.now() - RAW_LEASE_EXPIRED_MS);
+              fs.utimesSync(expiredFile, expired, expired);
+              reclaimExpiredRawFiles(root);
+              assert.equal(fs.existsSync(expiredFile), false);
               assert.equal(fs.readFileSync(activeFile, "utf8"), before);
             }
             return { text: JSON.stringify({ positive: [], negative: [], gaps: [] }) };
