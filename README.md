@@ -283,8 +283,10 @@ Configured SSH hosts are collected after the local stores and join the same corp
 
 Collection is incremental.
 Codex alone can hold 10,000+ rollouts, so file-store headers are cached in `.backpass/scan-cache.json` by path, mtime and size; new or changed files are re-read.
-Tier-2.5 candidates from file and SQLite stores are read once for their work paths, cached in the same file by transcript identity, content signature and resolver version.
-Re-scans reuse those paths but check their checkout ownership against the live filesystem again.
+Tier-2.5 work paths are cached in the same file by transcript identity, a work-cache signature and resolver version.
+For file-backed candidates, the work-cache signature uses the transcript's content signature (falling back to mtime and size), so unchanged candidates reuse their cached paths without another transcript read.
+SQLite candidates are read once per scan, including cache hits; a hash of their cwd and events keys only the work-path cache, while each transcript retains its adapter-provided content signature for evidence and nested attribution.
+Re-scans check the paths' checkout ownership against the live filesystem again.
 A harness whose store is missing or has drifted into an unrecognised shape produces a
 warning and is skipped; the run continues.
 backpass's own loss and gradient-descent calls land in these same stores under the repo's cwd; every prompt it sends is tagged, and tagged sessions are excluded from the corpus (the `SELF` column in `backpass scan`).
