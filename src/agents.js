@@ -592,7 +592,7 @@ function exhaustedError(role, trail) {
     return `  ${t.model.padEnd(width)}  ${t.agent.padEnd(9)} ${label}${t.detail ? ` (${t.detail})` : ""}${hint ? `  ${hint}` : ""}`;
   });
   // "log in" is only true advice when something in the trail is actually an auth
-  // failure - an all-"empty-output" trail (exhausted credits) needs its own line, not
+  // failure - an all-"empty-output" trail needs its own line, not
   // login instructions that don't apply to any candidate shown above.
   const pinHint = `pin one explicitly: backpass --${role}-agent <agent> --${role}-model <id>`;
   const closing = trail.some((t) => t.verdict === "unauthenticated")

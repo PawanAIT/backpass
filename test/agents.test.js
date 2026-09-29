@@ -413,7 +413,7 @@ test("one blank turn is retried on the same candidate, which keeps its place", a
   });
   assert.equal(result, "pi");
   assert.equal(turns, 2);
-  assert.equal(state.cache.entries["pi|gpt-5.6-luna"]?.verdict, "ok", "a passing hiccup is not remembered");
+  assert.equal(state.cache.entries["pi|gpt-5.6-luna"]?.verdict, "ok", "a single blank turn is not remembered");
   assert.equal((await resolver.resolve("analysis")).agent, "pi");
 });
 
