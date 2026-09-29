@@ -5,6 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
+import { State } from "../src/state.js";
 
 /**
  * A fatal analysis error stops the run from starting more model calls.
@@ -14,7 +15,7 @@ import { spawnSync } from "node:child_process";
  * classify - used to stop only the worker that hit it. The run reported the failure while
  * every other worker kept taking transcripts and paying for model calls. This drives the
  * real CLI with two jobs over five sessions: the call that fails and the one already in
- * flight run, and no third call starts.
+ * flight run, the healthy call's evidence is saved, and no third call starts.
  */
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -24,6 +25,13 @@ const binDir = fs.mkdtempSync(path.join(os.tmpdir(), "backpass-stop-bin-"));
 const fakePi = path.join(binDir, "pi");
 const fakeAcpx = path.join(binDir, "acpx");
 const callLog = path.join(binDir, "calls.log");
+const gap = {
+  mistake: "Tests needed a user reminder.",
+  proposedInstruction: "Run tests before declaring the work complete.",
+  recurrenceRisk: "high",
+  quote: "Now run the tests too.",
+  domain: "project",
+};
 
 fs.writeFileSync(fakePi, `#!${process.execPath}\nprocess.exit(0);\n`);
 fs.chmodSync(fakePi, 0o755);
@@ -45,7 +53,7 @@ if (argv.includes("--file")) {
     process.exit(1);
   }
   setTimeout(() => {
-    process.stdout.write(JSON.stringify({ positive: [], negative: [], gaps: [] }) + "\\n");
+    process.stdout.write(JSON.stringify({ positive: [], negative: [], gaps: [${JSON.stringify(gap)}] }) + "\\n");
     process.exit(0);
   }, 1500);
 } else {
@@ -117,4 +125,11 @@ test("a fatal analysis error stops the run from starting more model calls", () =
   assert.match(output, /pinned analysis agent pi/, output);
   const calls = fs.readFileSync(callLog, "utf8").trim().split("\n").sort();
   assert.deepEqual(calls, ["doomed", "second"], "only the calls already in flight ran");
+
+  // Read the persisted analysis contract after the CLI has exited, not its model output.
+  const evidence = new State(dir).listEvidence();
+  assert.equal(evidence.length, 1, "only the healthy in-flight session saved evidence");
+  assert.equal(path.basename(evidence[0].transcript.path), "second.jsonl");
+  assert.equal(evidence[0].status, "ok", "the in-flight analysis succeeded despite the fatal error");
+  assert.deepEqual(evidence[0].gaps, [gap], "the healthy call's evidence survives shutdown");
 });
