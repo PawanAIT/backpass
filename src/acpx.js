@@ -229,11 +229,9 @@ export function isBlankOutput(text) {
  * (`"An empty array is a valid and useful answer"`), so blank output means the turn
  * never really ran - most often an upstream provider error (exhausted credits, a
  * suspended key) that an ACP bridge swallows without ever writing to stderr, sometimes a
- * passing provider hiccup. Unlike garbled prose, no real work was done, so it is safe to
- * retry the candidate once and then demote it and retry with the next one in the ladder
- * rather than burning the whole run on it (`withFallthrough` in `src/agents.js`).
- * Call this from inside a `withFallthrough` callback, before the caller's own
- * `extractJson` check, so the throw is still in scope to trigger a fallthrough.
+ * passing provider hiccup. Call this from inside a `withFallthrough` callback, before
+ * the caller's own `extractJson` check, so `src/agents.js` owns retry and fallthrough
+ * handling rather than treating the blank turn as malformed JSON.
  *
  * Not for every model call: synthesis's edit turn never reads its own `text` (the edit
  * happens through tool calls, so blank is normal there) and its annotate turn
@@ -316,7 +314,7 @@ function assertNotAcpxBudgetKill({
  * (almost) the whole `--timeout` budget is named a timeout first
  * (`assertNotAcpxBudgetKill`), so acpx's own kill never reads as a provider failure.
  * Shared by `analyze.js` and `consolidate.js`; call from inside a `withFallthrough`
- * callback so a blank result still falls through to the next candidate.
+ * callback for the blank-turn recovery policy in `src/agents.js`.
  *
  * @param {Parameters<typeof execOneShot>[0]} call
  * @param {{ agent: string, model?: string | null, effort?: string | null }} pick
