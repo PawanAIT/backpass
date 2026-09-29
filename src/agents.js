@@ -512,8 +512,13 @@ export class AgentResolver {
    * Unclassifiable errors (garbage output) propagate unchanged. A timeout on real work propagates
    * unchanged for pinned and auto-picked agents alike: it is never classified (whatever its stderr
    * says), demoted, or retried.
+   *
+   * A blank turn is retried once on the same candidate first. One blank turn is as often a passing
+   * provider hiccup as exhausted credits, and only a second one tells them apart; without the retry a
+   * hiccup demotes a working candidate for later runs too, or stops a pinned run hours in.
    */
   async withFallthrough(role, fn) {
+    const retriedBlank = new Set();
     for (;;) {
       const pick = await this.resolve(role);
       try {
@@ -521,6 +526,12 @@ export class AgentResolver {
       } catch (err) {
         const isAcpxError = err instanceof AcpxError;
         if (isAcpxError && err.timedOut) throw err;
+        const candidate = `${pick.agent}|${pick.model}`;
+        if (isAcpxError && err.emptyOutput && !retriedBlank.has(candidate)) {
+          retriedBlank.add(candidate);
+          warn(`${role}: ${pick.agent} (${pick.model}) returned no output; retrying it once`);
+          continue;
+        }
         const verdict = isAcpxError ? classifyAcpxFailure(err) : null;
         if (isAcpxError && pick.pinned) throw pinnedFailureError(role, pick, verdict, err);
         if (!verdict) throw err;

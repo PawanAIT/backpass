@@ -710,7 +710,9 @@ are re-probed when their credential or auth-file state changes; `--force` re-pro
 entry. The probe is a filter, not a promise: if the chosen harness answers `AUTH_REQUIRED`,
 rejects the model, or returns a clean exit with no output at all (a provider account out
 of quota or credits, often swallowed before it reaches stderr) mid-run, backpass falls
-through to the next candidate and says so. The one blank exit that never falls through is
+through to the next candidate and says so. A blank exit is first retried once on the same
+candidate, because one blank turn can also be a passing provider hiccup; a pinned agent that
+stays blank stops the run. The one blank exit that never falls through is
 one that consumed the call's whole `--timeout` budget - that is acpx enforcing the timeout
 itself, and backpass reports it as a timeout, not a provider failure. When a whole ladder
 is exhausted the error lists every candidate with what to run to fix it.
