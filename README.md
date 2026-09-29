@@ -219,7 +219,7 @@ backpass reads the local transcript stores of seven harnesses directly. No API, 
 | **claude**     | `~/.claude/projects/<munged-cwd>/<uuid>.jsonl` | per-line `cwd`                                      |
 | **codex**      | `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl` | `cwd` + recorded `git.repository_url`               |
 | **pi**         | standalone and BB-managed Pi JSONL stores      | session-header `cwd`                                |
-| **opencode**   | `~/.local/share/opencode/opencode.db` (sqlite) | `session.directory`                                 |
+| **opencode**   | `~/.local/share/opencode/opencode.db` (sqlite) | `session.directory` / `session_v2.directory`        |
 | **grok**       | `~/.grok/sessions/<encoded-cwd>/<uuid>/`       | `summary.json` `cwd` + `git_remotes`                |
 | **cursor CLI** | `~/.cursor/chats/<md5(cwd)>/<uuid>/`           | `meta.json` `cwd`                                   |
 | **hermes**     | `~/.hermes/state.db` (sqlite)                  | session cwd, with CLI prompt / ACP config fallbacks |
@@ -234,6 +234,13 @@ sessions under `~/.bb/pi-bridge-sessions/`. It also honors `PI_CODING_AGENT_DIR`
 `PI_CODING_AGENT_SESSION_DIR`, `BB_DATA_DIR`, and `BB_PI_BRIDGE_SESSION_DIR` when they are
 set in backpass's environment. When roots overlap, backpass scans every applicable layout
 and reads each JSONL file once.
+
+OpenCode collection reads both store layouts: OpenCode 1.x (`session`, `message`, `part`)
+and OpenCode 2.x (`session_v2`, `session_message`), where a session is dated by its newest
+message. An upgraded store keeps its 1.x tables beside the copies in `session_v2`, so a
+session found in both is read from `session_v2`. In a 2.x session, text the harness injected
+(instruction files, continue notices, system notices) is left out, and the completion of a
+background subagent or shell becomes the result of the call that started it.
 
 Hermes collection includes CLI and ACP sessions, plus TUI sessions with an absolute
 `sessions.cwd`. Gateway, cron, and WhatsApp sessions are excluded because their recorded

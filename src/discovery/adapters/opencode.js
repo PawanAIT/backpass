@@ -6,25 +6,40 @@ import { home, listDirs, readJsonFile, statOrNull } from "./shared.js";
 import { openReadOnly, safeJsonParse } from "./sqlite.js";
 
 /**
- * opencode: ~/.local/share/opencode/opencode.db (sqlite)
+ * opencode: ~/.local/share/opencode/opencode.db (sqlite), in one of two layouts.
  *
- *   project(id, worktree)             - one row per project root
- *   session(id, project_id, directory, title, time_created)
- *   message(id, session_id, data)     - data is JSON: {role, model, time, ...}
+ * OpenCode 1.x keeps messages and their parts in two tables:
+ *
+ *   project(id, worktree)                  - one row per project root
+ *   session(id, project_id, parent_id, directory, title, time_created, time_updated)
+ *   message(id, session_id, data)          - data is JSON: {role, modelID, time, ...}
  *   part(id, message_id, session_id, data) - data is JSON: {type: text|tool|reasoning|...}
  *
- * Listing returns `session.directory`, deleted worktrees included, for the caller's
- * shared association tiers. Older opencode versions used file storage under `storage/`;
- * that layout is handled as a fallback so long-lived machines still yield transcripts.
+ * OpenCode 2.x keeps a session's history as one typed row per message:
+ *
+ *   session_v2(id, project_id, parent_id, directory, title, time_created, time_updated)
+ *   session_message(id, session_id, type, seq, time_created, time_updated, data)
+ *
+ * `session_v2.time_updated` does not move as messages arrive, so a 2.x session's
+ * activity is its newest message. Upgrading copies every 1.x session into `session_v2`
+ * under the same id and leaves the 1.x tables behind, so a session found in both is
+ * read from `session_v2`, where it continues. (1.x also creates an empty
+ * `session_message` table ahead of that upgrade.) A store with neither session table
+ * has drifted and is reported, never read as empty.
+ *
+ * Listing returns each session's directory, deleted worktrees included, for the
+ * caller's shared association tiers. Older opencode versions used file storage under
+ * `storage/`; that layout is handled as a fallback so long-lived machines still yield
+ * transcripts.
  *
  * acpx drives opencode, so backpass's own analysis and synthesis calls land in this
  * store under the repo's cwd. There is no transcript file for `../self.js` to read, so
- * the listing query reads the first text part of each session's first user message and
- * the row is marked `self` when it opens with the sentinel every backpass prompt starts
- * with. Self ancestry is propagated once per discovery, without the listing cutoff,
- * so delegated work cannot re-enter the corpus
- * when its backpass-originated parent ages out of the discovery window. A session
- * with no messages at all, such as the one each agent probe creates, is not listed.
+ * the listing reads the text of each session's first user message and the row is marked
+ * `self` when it opens with the sentinel every backpass prompt starts with. Self
+ * ancestry is propagated once per discovery, without the listing cutoff, so delegated
+ * work cannot re-enter the corpus when its backpass-originated parent ages out of the
+ * discovery window. A session with no messages at all, such as the one each agent probe
+ * creates, is not listed.
  */
 
 export const name = "opencode";
@@ -51,7 +66,7 @@ function hasTables(db, ...names) {
 }
 
 /** Pick the first user message before its text, so attachment-only openings stay genuine. */
-const FIRST_USER_PART = `(SELECT pt.data
+const V1_FIRST_USER_PART = `(SELECT pt.data
      FROM part pt
     WHERE pt.message_id = (
       SELECT m.id FROM message m
@@ -63,68 +78,128 @@ const FIRST_USER_PART = `(SELECT pt.data
     ORDER BY pt.id
     LIMIT 1)`;
 
+/** The text of a 2.x session's first user message, skipping malformed JSON. */
+const V2_FIRST_USER_TEXT = `(SELECT CASE WHEN json_valid(m.data) THEN json_extract(m.data, '$.text') END
+     FROM session_message m
+    WHERE m.session_id = s.id AND m.type = 'user'
+    ORDER BY m.seq
+    LIMIT 1)`;
+
+/**
+ * Discovery is direct: one query per layout lists every session with its directory, and
+ * the caller applies the shared association tiers.
+ */
 export async function discover({ cutoffMs }) {
   const db = await openReadOnly(dbPath());
   if (!db) return legacyDiscover({ cutoffMs });
 
   try {
-    const parentSelect = tableHasColumn(db, "session", "parent_id") ? ", s.parent_id AS parent_id" : "";
-    const firstUserSelect = hasTables(db, "message", "part") ? `, ${FIRST_USER_PART} AS first_user_part` : "";
-    // Unused probes have no messages; attachment conversations need not have user text.
-    const recordedSelect = hasTables(db, "message")
-      ? "EXISTS (SELECT 1 FROM message m WHERE m.session_id = s.id)"
-      : "1";
-    const rows = db
-      .prepare(
-        `SELECT s.id AS id, s.directory AS directory, s.title AS title,
-                s.time_created AS time_created, s.time_updated AS time_updated,
-                p.worktree AS worktree, ${recordedSelect} AS recorded${parentSelect}${firstUserSelect}
-           FROM session s
-           LEFT JOIN project p ON p.id = s.project_id`,
-      )
-      .all();
-
-    const children = new Map();
-    const selfIds = new Set();
-    for (const row of rows) {
-      if (opensWithSentinel(safeJsonParse(row.first_user_part)?.text)) selfIds.add(row.id);
-      if (row.parent_id) {
-        if (!children.has(row.parent_id)) children.set(row.parent_id, []);
-        children.get(row.parent_id).push(row.id);
-      }
-    }
-    // Set iteration visits new additions too; each descendant is propagated once,
-    // including empty intermediates, and cycles terminate without recursive queries.
-    for (const id of selfIds) {
-      for (const child of children.get(id) || []) selfIds.add(child);
-    }
-
-    return rows
-      .filter((row) => row.recorded && (cutoffMs == null || row.time_updated >= cutoffMs))
-      .map((row) => ({
-        key: `opencode:${row.id}`,
-        id: row.id,
-        path: dbPath(),
-        cwd: row.directory,
-        gitRoot: row.worktree || null,
-        gitBranch: null,
-        remotes: [],
-        title: row.title || null,
-        startedAt: Number(row.time_created) || null,
-        mtimeMs: Number(row.time_updated) || Number(row.time_created) || 0,
-        bytes: 0,
-        model: null,
-        extra: { sessionId: row.id },
-        interactionSignals: row.parent_id ? interactionSignals({ parentId: row.parent_id }) : emptyInteractionSignals(),
-        self: selfIds.has(row.id),
-      }));
+    const v2 = hasTables(db, "session_v2", "session_message");
+    const v1 = hasTables(db, "session");
+    if (!v2 && !v1) throw new Error("no session or session_v2 table (unrecognised opencode store)");
+    const sessions = [...(v2 ? listV2(db) : []), ...(v1 ? listV1(db, { skipV2: v2 }) : [])];
+    const self = selfSessions(sessions);
+    return sessions
+      .filter((session) => session.recorded && (cutoffMs == null || session.mtimeMs >= cutoffMs))
+      .map((session) => sessionRow(session, self.has(session.id)));
   } finally {
     db.close();
   }
 }
 
+/**
+ * Every session one of backpass's own prompts opened, plus every session delegated from
+ * one - a subagent's task prompt carries no sentinel - however deep, and whether or not
+ * the parent is still inside the listing window.
+ */
+function selfSessions(sessions) {
+  const children = new Map();
+  const self = new Set();
+  for (const session of sessions) {
+    if (opensWithSentinel(session.firstUserText)) self.add(session.id);
+    if (session.parentId) {
+      if (!children.has(session.parentId)) children.set(session.parentId, []);
+      children.get(session.parentId).push(session.id);
+    }
+  }
+  // Set iteration visits new additions too; each descendant is propagated once,
+  // including empty intermediates, and cycles terminate without recursive queries.
+  for (const id of self) {
+    for (const child of children.get(id) || []) self.add(child);
+  }
+  return self;
+}
+
 function opensWithSentinel(text) {
   return typeof text === "string" && text.startsWith(SELF_SESSION_SENTINEL);
+}
+
+function listV1(db, { skipV2 }) {
+  const parentSelect = tableHasColumn(db, "session", "parent_id") ? ", s.parent_id AS parent_id" : "";
+  const firstUserSelect = hasTables(db, "message", "part") ? `, ${V1_FIRST_USER_PART} AS first_user_part` : "";
+  // Unused probes have no messages; attachment conversations need not have user text.
+  const recordedSelect = hasTables(db, "message") ? "EXISTS (SELECT 1 FROM message m WHERE m.session_id = s.id)" : "1";
+  const rows = db
+    .prepare(
+      `SELECT s.id AS id, s.directory AS directory, s.title AS title,
+              s.time_created AS time_created, s.time_updated AS time_updated,
+              p.worktree AS worktree, ${recordedSelect} AS recorded${parentSelect}${firstUserSelect}
+         FROM session s
+         LEFT JOIN project p ON p.id = s.project_id
+        ${skipV2 ? "WHERE s.id NOT IN (SELECT id FROM session_v2)" : ""}`,
+    )
+    .all();
+  return rows.map((row) => ({
+    ...row,
+    layout: "v1",
+    parentId: row.parent_id || null,
+    mtimeMs: Number(row.time_updated) || Number(row.time_created) || 0,
+    firstUserText: safeJsonParse(row.first_user_part)?.text,
+  }));
+}
+
+function listV2(db) {
+  const rows = db
+    .prepare(
+      `SELECT s.id AS id, s.directory AS directory, s.title AS title, s.parent_id AS parent_id,
+              s.time_created AS time_created, s.time_updated AS time_updated,
+              p.worktree AS worktree,
+              EXISTS (SELECT 1 FROM session_message m WHERE m.session_id = s.id) AS recorded,
+              (SELECT MAX(m.time_updated) FROM session_message m WHERE m.session_id = s.id) AS message_time,
+              ${V2_FIRST_USER_TEXT} AS first_user_text
+         FROM session_v2 s
+         LEFT JOIN project p ON p.id = s.project_id`,
+    )
+    .all();
+  return rows.map((row) => ({
+    ...row,
+    layout: "v2",
+    parentId: row.parent_id || null,
+    mtimeMs: Math.max(Number(row.time_updated) || 0, Number(row.message_time) || 0) || Number(row.time_created) || 0,
+    firstUserText: row.first_user_text,
+  }));
+}
+
+function sessionRow(session, self) {
+  return {
+    key: `opencode:${session.id}`,
+    id: session.id,
+    path: dbPath(),
+    cwd: session.directory,
+    gitRoot: session.worktree || null,
+    gitBranch: null,
+    remotes: [],
+    title: session.title || null,
+    startedAt: Number(session.time_created) || null,
+    mtimeMs: session.mtimeMs,
+    bytes: 0,
+    model: null,
+    extra: { sessionId: session.id, layout: session.layout },
+    interactionSignals: session.parentId
+      ? interactionSignals({ parentId: session.parentId })
+      : emptyInteractionSignals(),
+    self,
+  };
 }
 
 export async function read(ref) {
@@ -133,50 +208,158 @@ export async function read(ref) {
 
   try {
     const sessionId = ref.extra?.sessionId || ref.id;
-    const messages = db
-      .prepare("SELECT id, data FROM message WHERE session_id = ? ORDER BY time_created, id")
-      .all(sessionId);
-    const parts = db
-      .prepare("SELECT message_id, data FROM part WHERE session_id = ? ORDER BY time_created, id")
-      .all(sessionId);
-
-    const partsByMessage = new Map();
-    for (const part of parts) {
-      if (!partsByMessage.has(part.message_id)) partsByMessage.set(part.message_id, []);
-      partsByMessage.get(part.message_id).push(safeJsonParse(part.data));
-    }
-
-    const events = [];
-    let model = null;
-
-    for (const message of messages) {
-      const data = safeJsonParse(message.data) || {};
-      const role = data.role === "user" ? "user" : "assistant";
-      model = model || data.modelID || data.model?.modelID || null;
-
-      const texts = [];
-      for (const part of partsByMessage.get(message.id) || []) {
-        if (!part) continue;
-        if (part.type === "text" && part.text) {
-          texts.push(part.text);
-        } else if (part.type === "tool") {
-          events.push({
-            kind: "tool",
-            name: part.tool || part.name,
-            input: part.state?.input ?? part.input,
-            result: part.state?.output ?? part.output,
-            status: part.state?.status,
-          });
-        }
-        // reasoning / step-start / step-finish / patch / file parts carry no loss signal.
-      }
-      if (texts.length) events.push({ kind: "message", role, text: texts.join("\n") });
-    }
-
-    return { events, model };
+    return layoutOf(db, ref, sessionId) === "v2" ? readV2(db, sessionId) : readV1(db, sessionId);
   } finally {
     db.close();
   }
+}
+
+/** Discovery records the layout; a ref from before it did is looked up the same way. */
+function layoutOf(db, ref, sessionId) {
+  if (ref.extra?.layout) return ref.extra.layout;
+  if (!hasTables(db, "session_v2", "session_message")) return "v1";
+  return db.prepare("SELECT 1 FROM session_v2 WHERE id = ?").get(sessionId) ? "v2" : "v1";
+}
+
+function readV1(db, sessionId) {
+  const messages = db
+    .prepare("SELECT id, data FROM message WHERE session_id = ? ORDER BY time_created, id")
+    .all(sessionId);
+  const parts = db
+    .prepare("SELECT message_id, data FROM part WHERE session_id = ? ORDER BY time_created, id")
+    .all(sessionId);
+
+  const partsByMessage = new Map();
+  for (const part of parts) {
+    if (!partsByMessage.has(part.message_id)) partsByMessage.set(part.message_id, []);
+    partsByMessage.get(part.message_id).push(safeJsonParse(part.data));
+  }
+
+  const events = [];
+  let model = null;
+
+  for (const message of messages) {
+    const data = safeJsonParse(message.data) || {};
+    const role = data.role === "user" ? "user" : "assistant";
+    model = model || data.modelID || data.model?.modelID || null;
+
+    const texts = [];
+    for (const part of partsByMessage.get(message.id) || []) {
+      if (!part) continue;
+      if (part.type === "text" && part.text) {
+        texts.push(part.text);
+      } else if (part.type === "tool") {
+        events.push({
+          kind: "tool",
+          name: part.tool || part.name,
+          input: part.state?.input ?? part.input,
+          result: part.state?.output ?? part.output,
+          status: part.state?.status,
+        });
+      }
+      // reasoning / step-start / step-finish / patch / file parts carry no loss signal.
+    }
+    if (texts.length) events.push({ kind: "message", role, text: texts.join("\n") });
+  }
+
+  return { events, model };
+}
+
+/**
+ * A 2.x session, message by message in `seq` order:
+ *
+ *   user        the prompt as sent
+ *   assistant   text and tool calls in the order the model produced them; reasoning is
+ *               dropped. A tool's result is its text content, or its error message.
+ *   shell       a command the person ran from the prompt, as a `shell` tool call
+ *   skill       a skill the person activated, as a `skill` call without its body
+ *   synthetic   text the harness injected (instruction files, "continue" notices,
+ *               background-job notifications) - never a user turn. The one kind that
+ *               carries session signal is the completion of a background subagent or
+ *               shell, which becomes the result of the call that started the job.
+ *
+ * `system` notices, `compaction` summaries (a model's summary of turns still stored
+ * above them), `idle` markers and agent/model/location switches carry no loss signal.
+ */
+function readV2(db, sessionId) {
+  const rows = db.prepare("SELECT type, data FROM session_message WHERE session_id = ? ORDER BY seq").all(sessionId);
+  const events = [];
+  const backgroundJobs = new Map();
+  let model = null;
+
+  for (const row of rows) {
+    const data = safeJsonParse(row.data);
+    if (!data || typeof data !== "object") continue;
+    switch (row.type) {
+      case "user":
+        if (typeof data.text === "string" && data.text.trim()) {
+          events.push({ kind: "message", role: "user", text: data.text });
+        }
+        break;
+      case "assistant": {
+        model = model || data.model?.id || null;
+        const texts = [];
+        const flushText = () => {
+          if (texts.length) events.push({ kind: "message", role: "assistant", text: texts.join("\n") });
+          texts.length = 0;
+        };
+        for (const item of Array.isArray(data.content) ? data.content : []) {
+          if (item?.type === "text" && typeof item.text === "string" && item.text) {
+            texts.push(item.text);
+          } else if (item?.type === "tool") {
+            flushText();
+            const call = toolEvent(item);
+            events.push(call);
+            const job = item.state?.metadata?.sessionID ?? item.state?.metadata?.shellID;
+            if (typeof job === "string") backgroundJobs.set(job, call);
+          }
+        }
+        flushText();
+        break;
+      }
+      case "shell":
+        events.push({
+          kind: "tool",
+          name: "shell",
+          input: { command: data.command },
+          result: data.output?.output,
+          status: shellStatus(data),
+        });
+        break;
+      case "skill":
+        events.push({ kind: "tool", name: "skill", input: { name: data.name }, status: "completed" });
+        break;
+      case "synthetic": {
+        const job = data.metadata?.childID ?? data.metadata?.shellID;
+        const call = typeof job === "string" ? backgroundJobs.get(job) : null;
+        if (call && typeof data.text === "string") {
+          call.result = data.text;
+          call.status = data.metadata?.state || call.status;
+        }
+        break;
+      }
+      default:
+        break;
+    }
+  }
+
+  return { events, model };
+}
+
+function toolEvent(item) {
+  const state = item.state && typeof item.state === "object" ? item.state : {};
+  const content = (Array.isArray(state.content) ? state.content : [])
+    .filter((entry) => entry?.type === "text" && typeof entry.text === "string")
+    .map((entry) => entry.text)
+    .join("\n");
+  const error = state.status === "error" ? state.error?.message : undefined;
+  const result = [error, content].filter(Boolean).join("\n");
+  return { kind: "tool", name: item.name, input: state.input, result: result || undefined, status: state.status };
+}
+
+function shellStatus(shell) {
+  if (shell.status !== "exited") return shell.status;
+  return (shell.exit ?? 0) === 0 ? "completed" : "error";
 }
 
 /** Pre-sqlite opencode kept JSON files under storage/. Best-effort, never fatal. */
@@ -193,12 +376,17 @@ function legacyDiscover({ cutoffMs }) {
       id: path.basename(dir),
       path: dir,
       cwd: meta.worktree,
+      gitRoot: null,
+      gitBranch: null,
       remotes: [],
+      title: null,
       startedAt: stat.birthtimeMs || stat.mtimeMs,
       mtimeMs: stat.mtimeMs,
       bytes: 0,
+      model: null,
       extra: { legacy: true },
       interactionSignals: emptyInteractionSignals(),
+      self: false,
     });
   }
   return out;
