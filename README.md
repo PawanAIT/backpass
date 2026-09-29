@@ -750,11 +750,10 @@ minutes for a cold-starting adapter; the remaining probe operations retain their
 durable verdicts are cached in
 `.backpass/agent-probe-cache.json` for 12h (30min for negatives). Pi and OpenCode entries
 are re-probed when their credential or auth-file state changes; `--force` re-probes every
-entry. The probe is a filter, not a promise: if the chosen harness answers `AUTH_REQUIRED`,
-rejects the model, or returns a clean exit with no output at all (a provider account out
-of quota or credits, often swallowed before it reaches stderr) mid-run, backpass falls
-through to the next candidate and says so.
-A blank exit is first retried once on the same candidate, because one blank turn can also be a passing provider hiccup; a pinned agent that stays blank stops the run.
+entry.
+The probe is a filter, not a promise: if the chosen harness answers `AUTH_REQUIRED` or rejects the model mid-run, backpass falls through to the next candidate and says so.
+A clean exit with no output at all can mean exhausted provider quota or credits, but also a transient provider hiccup, so backpass retries it once on the same candidate for that call.
+A second blank demotes the candidate and falls through to the next one in the ladder, or stops the run if the agent is pinned.
 Model-turn timeouts never fall through, whether enforced by backpass or reported by acpx itself; in analysis, only that transcript fails and is retried next run, including with a pinned agent.
 A clean blank exit that consumed nearly the whole `--timeout` budget is also treated as a timeout, for compatibility with older acpx versions.
 When a whole ladder is exhausted the error lists every candidate with what to run to fix it.
