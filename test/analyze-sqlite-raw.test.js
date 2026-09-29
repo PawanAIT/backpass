@@ -40,13 +40,19 @@ if (argv.includes("config") && argv.includes("show")) {
 if (argv.includes("--file")) {
   const prompt = fs.readFileSync(argv[argv.indexOf("--file") + 1], "utf8");
   const rawPath = /^raw transcript: (.+)$/m.exec(prompt)[1];
-  const seen = { rawPath, exists: fs.existsSync(rawPath), lines: [] };
+  const seen = { rawPath, exists: fs.existsSync(rawPath), mode: fs.statSync(rawPath).mode & 0o777, lines: [] };
   if (seen.exists) seen.lines = fs.readFileSync(rawPath, "utf8").trim().split("\\n").map((line) => JSON.parse(line));
   fs.writeFileSync(${JSON.stringify(seenLog)}, JSON.stringify(seen));
-  process.stdout.write(JSON.stringify({ positive: [], negative: [], gaps: [] }) + "\\n");
+  if (process.env.RAW_TEST_SIGNAL && (!process.env.RAW_TEST_SIGNAL_MATCH || rawPath.includes(process.env.RAW_TEST_SIGNAL_MATCH))) {
+    process.kill(process.ppid, process.env.RAW_TEST_SIGNAL);
+    setTimeout(() => process.exit(0), 100);
+  } else {
+    process.stdout.write(process.env.RAW_TEST_INVALID ? "not JSON" : JSON.stringify({ positive: [], negative: [], gaps: [] }));
+    process.exit(0);
+  }
+} else {
   process.exit(0);
 }
-process.exit(0);
 `,
 );
 fs.chmodSync(fakeAcpx, 0o755);
@@ -67,7 +73,7 @@ function initRepo() {
 }
 
 /** An opencode 1.x store with this repo's session and one from somewhere else. */
-function writeStore(home, repoDir) {
+function writeStore(home, repoDir, sessionDir = repoDir) {
   const store = path.join(home, ".local", "share", "opencode");
   fs.mkdirSync(store, { recursive: true });
   const db = new DatabaseSync(path.join(store, "opencode.db"));
@@ -85,7 +91,7 @@ function writeStore(home, repoDir) {
   `);
   const now = Date.now();
   const sessions = [
-    { id: "ses_here", directory: repoDir, turns: ["Please build the project.", "Now run the tests too."] },
+    { id: "ses_here", directory: sessionDir, turns: ["Please build the project.", "Now run the tests too."] },
     { id: "ses_elsewhere", directory: "/somewhere/else", turns: ["An unrelated secret plan."] },
   ];
   db.prepare("INSERT INTO project (id, worktree) VALUES ('p1', ?)").run(repoDir);
@@ -133,12 +139,8 @@ function writeStore(home, repoDir) {
   return path.join(store, "opencode.db");
 }
 
-test("a SQLite session's escape hatch is a file of its own events, removed after the call", () => {
-  const home = fs.mkdtempSync(path.join(os.tmpdir(), "backpass-sqlite-raw-home-"));
-  const dir = initRepo();
-  const database = writeStore(home, dir);
-
-  const result = spawnSync(
+function analyze(dir, home, env = {}) {
+  return spawnSync(
     process.execPath,
     [CLI, "analyze", "--harness", "opencode", "--since", "all", "--analysis-agent", "pi", "--jobs", "1", "--json"],
     {
@@ -150,11 +152,19 @@ test("a SQLite session's escape hatch is a file of its own events, removed after
         PATH: `${binDir}${path.delimiter}${process.env.PATH}`,
         BACKPASS_ACPX_BIN: fakeAcpx,
         NO_COLOR: "1",
+        ...env,
       },
       encoding: "utf8",
       timeout: 20000,
     },
   );
+}
+
+test("a SQLite session's escape hatch is a file of its own events, removed after the call", () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "backpass-sqlite-raw-home-"));
+  const dir = initRepo();
+  const database = writeStore(home, dir);
+  const result = analyze(dir, home);
   assert.equal(result.status, 0, `${result.stdout}${result.stderr}`);
   assert.equal(JSON.parse(result.stdout).summary.analyzed, 1);
 
@@ -162,6 +172,7 @@ test("a SQLite session's escape hatch is a file of its own events, removed after
   assert.notEqual(seen.rawPath, database, "the footer never names the whole database");
   assert.equal(path.dirname(seen.rawPath), path.join(dir, ".backpass", "raw"));
   assert.equal(seen.exists, true, "the file is there for the length of the call");
+  if (process.platform !== "win32") assert.equal(seen.mode, 0o600);
   const [header, ...events] = seen.lines;
   assert.deepEqual(header, { harness: "opencode", session: "ses_here", model: null });
   assert.deepEqual(
@@ -170,4 +181,70 @@ test("a SQLite session's escape hatch is a file of its own events, removed after
   );
   assert.ok(!JSON.stringify(seen.lines).includes("unrelated secret"), "no other session reaches the agent");
   assert.equal(fs.existsSync(seen.rawPath), false, "the file is removed once the call has returned");
+
+  fs.rmSync(seenLog);
+  fs.rmdirSync(path.dirname(seen.rawPath));
+  const cached = analyze(dir, home);
+  assert.equal(cached.status, 0, `${cached.stdout}${cached.stderr}`);
+  assert.equal(JSON.parse(cached.stdout).summary.cached, 1);
+  assert.equal(fs.existsSync(seenLog), false);
+  assert.equal(fs.existsSync(path.dirname(seen.rawPath)), false);
+});
+
+for (const signal of ["SIGINT", "SIGTERM"]) {
+  for (const nested of [false, true]) {
+    test(
+      `a SQLite raw file is removed when ${nested ? "nested" : "root"} analysis receives ${signal}`,
+      { skip: process.platform === "win32" },
+      () => {
+        const home = fs.mkdtempSync(path.join(os.tmpdir(), "backpass-sqlite-raw-home-"));
+        const dir = initRepo();
+        const sessionDir = nested ? path.join(dir, "apps", "api") : dir;
+        if (nested) {
+          fs.mkdirSync(sessionDir, { recursive: true });
+          fs.writeFileSync(path.join(sessionDir, "AGENTS.md"), "# API instructions\n\n- Run API tests.\n");
+          fs.writeFileSync(
+            path.join(dir, ".backpassrc.json"),
+            JSON.stringify({ nestedMemoryFiles: ["apps/api/AGENTS.md"] }),
+          );
+        }
+        writeStore(home, dir, sessionDir);
+        fs.rmSync(seenLog, { force: true });
+        const result = analyze(dir, home, {
+          RAW_TEST_SIGNAL: signal,
+          RAW_TEST_SIGNAL_MATCH: nested ? path.join(".backpass", "nested") : "",
+        });
+        assert.equal(result.status, signal === "SIGINT" ? 130 : 143, `${result.stdout}${result.stderr}`);
+        const seen = JSON.parse(fs.readFileSync(seenLog, "utf8"));
+        assert.equal(seen.exists, true);
+        assert.equal(seen.rawPath.includes(path.join(".backpass", "nested")), nested);
+        assert.equal(fs.existsSync(seen.rawPath), false, "interrupting analysis must not retain raw events");
+      },
+    );
+  }
+}
+
+test("trivial SQLite sessions never materialize raw events", () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "backpass-sqlite-raw-home-"));
+  const dir = initRepo();
+  writeStore(home, dir);
+  fs.writeFileSync(path.join(dir, ".backpassrc.json"), JSON.stringify({ discovery: { minUserTurns: 3 } }));
+  fs.rmSync(seenLog, { force: true });
+  const result = analyze(dir, home);
+  assert.equal(result.status, 0, `${result.stdout}${result.stderr}`);
+  assert.equal(JSON.parse(result.stdout).summary.skipped, 2);
+  assert.equal(fs.existsSync(seenLog), false);
+  assert.equal(fs.existsSync(path.join(dir, ".backpass", "raw")), false);
+});
+
+test("a SQLite raw file is removed when the analysis response is invalid", () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "backpass-sqlite-raw-home-"));
+  const dir = initRepo();
+  writeStore(home, dir);
+  fs.rmSync(seenLog, { force: true });
+  const result = analyze(dir, home, { RAW_TEST_INVALID: "1" });
+  assert.equal(result.status, 0, `${result.stdout}${result.stderr}`);
+  assert.equal(JSON.parse(result.stdout).summary.failed, 1);
+  const seen = JSON.parse(fs.readFileSync(seenLog, "utf8"));
+  assert.equal(fs.existsSync(seen.rawPath), false);
 });

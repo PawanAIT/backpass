@@ -288,11 +288,9 @@ deterministically: user and assistant turns verbatim, each tool call collapsed t
 (`tool: Bash "npm test" -> 1 failing`), tool output truncated, injected harness scaffolding
 dropped, secrets redacted. Typical reduction is **96-99%**.
 
-The distilled trace ends with the path to the raw transcript, so the analysis agent can
-open the original when - and only when - a specific claim needs it. A session in a SQLite
-store (opencode, hermes, cursor IDE) has no file of its own - its store is one database
-holding every session - so its analysis call names a file of that session's events
-instead, written under `.backpass/raw/` and removed when the call returns.
+The distilled trace ends with the path to the raw transcript, so the analysis agent can open the original when - and only when - a specific claim needs it.
+For a session in a local SQLite store (opencode, hermes, Cursor CLI, Cursor IDE), the analysis call names a file of that session's normalized events instead of the store, which may contain other sessions or require queries against an undocumented schema.
+The file is written under `.backpass/raw/` with mode `0600`, only for non-trivial sessions, and removed when the call finishes or the process exits, including on SIGINT or SIGTERM.
 
 ### 3. Calculate loss - one cheap call per transcript
 
