@@ -514,8 +514,10 @@ export class AgentResolver {
    * says), demoted, or retried.
    *
    * A blank turn gets one retry per candidate per invocation before normal failure handling.
-   * This tolerates a transient provider hiccup without caching a negative verdict or stopping a
-   * pinned run, while repeated blanks still fail quickly when credits are exhausted.
+   * Not every blank turn is exhausted credits: a turn can also spend its whole output budget on
+   * reasoning (finish "length"), how far it reasons varies from attempt to attempt, and a provider
+   * can fail once. The retry absorbs those without caching a negative verdict or stopping a pinned
+   * run, while repeated blanks still fail quickly when credits are exhausted.
    */
   async withFallthrough(role, fn) {
     const retriedBlank = new Set();
