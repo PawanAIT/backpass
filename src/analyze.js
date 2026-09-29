@@ -154,12 +154,10 @@ function promptPathFor(state, transcript) {
 }
 
 /**
- * The raw-transcript escape hatch must open one session. A file-backed store's path is
- * that session's file, and a session fetched over ssh already reads from a cached copy of
- * its own events. A local SQLite store's path may expose sessions from other repositories
- * or require queries against an undocumented schema. So for the length of the call, a
- * local SQLite session gets a file of its own normalized events, one per line, under
- * `.backpass/raw/` (mode 0600), which is what the trace footer names.
+ * The raw-transcript escape hatch must open one session, not expose a shared database
+ * or require queries against an undocumented schema. File-backed sessions and remote
+ * cached copies already have session-specific paths; local SQLite sessions need a
+ * temporary export here. See README.md's Distill section for its lifecycle.
  *
  * @returns {string | null}
  */
