@@ -27,6 +27,7 @@ export function formatFailureLine(failure) {
  * typed by whoever decided. Unlike the surface's comment box it is parsed strictly - every
  * token names one edit of this proposal once, a verdict, and at most a known reject reason -
  * so a typo stops the apply instead of silently leaving an edit undecided.
+ * Repeated flags are joined into one vector before parsing.
  *
  * @param {string} text
  * @param {string[]} editIds
@@ -108,7 +109,7 @@ export async function cmdApply(ctx) {
 
   if (ctx.flags.decisions !== undefined) {
     if (ctx.flags["no-ui"]) throw new UserError("--decisions and --no-ui both decide the edits; pass one of them");
-    ({ decisions, reasons: rejectReasons } = parseDecisionsFlag(ctx.flags.decisions, editIds));
+    ({ decisions, reasons: rejectReasons } = parseDecisionsFlag(ctx.flags.decisions.join(" "), editIds));
   } else if (ctx.flags["no-ui"]) {
     decisions = await reviewInTerminal(proposal);
   } else {
