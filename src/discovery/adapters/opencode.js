@@ -21,8 +21,8 @@ import { openReadOnly, safeJsonParse } from "./sqlite.js";
  *   session_v2(id, project_id, parent_id, directory, title, time_created, time_updated)
  *   session_message(id, session_id, type, seq, time_created, time_updated, data)
  *
- * `session_v2.time_updated` does not move as messages arrive, so a 2.x session's
- * activity is its newest message. Upgrading copies every 1.x session into `session_v2`
+ * `session_v2.time_updated` does not move as messages arrive, so listing must also
+ * consider message activity. Upgrading copies every 1.x session into `session_v2`
  * under the same id and leaves the 1.x tables behind, so a session found in both is
  * read from `session_v2`, where it continues. (1.x also creates an empty
  * `session_message` table ahead of that upgrade.) A store with neither session table

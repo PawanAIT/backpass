@@ -235,23 +235,17 @@ sessions under `~/.bb/pi-bridge-sessions/`. It also honors `PI_CODING_AGENT_DIR`
 set in backpass's environment. When roots overlap, backpass scans every applicable layout
 and reads each JSONL file once.
 
-OpenCode collection reads both store layouts: OpenCode 1.x (`session`, `message`, `part`)
-and OpenCode 2.x (`session_v2`, `session_message`), where a session is dated by its newest
-message. An upgraded store keeps its 1.x tables beside the copies in `session_v2`, so a
-session found in both is read from `session_v2`. In a 2.x session, text the harness injected
-(instruction files, continue notices, system notices) is left out, and the completion of a
-background subagent or shell becomes the result of the call that started it.
+OpenCode collection reads both store layouts: OpenCode 1.x (`session`, `message`, `part`) and OpenCode 2.x (`session_v2`, `session_message`).
+For 2.x, session activity uses the later of the session's update time and its newest message's update time.
+An upgraded store keeps its 1.x tables beside the copies in `session_v2`, so a session found in both is read from `session_v2`.
+In a 2.x session, text the harness injected (instruction files, continue notices, system notices) is left out, and the completion of a background subagent or shell becomes the result of the call that started it.
 
-`discovery.opencodeStores` in your personal config names more OpenCode stores to read beside
-the default one. Each entry is an OpenCode data directory (holding `opencode.db`) or a
-database file, such as a copy of the store the Windows OpenCode app keeps, read from WSL. It
-is a config list rather than `XDG_DATA_HOME` or `OPENCODE_DB` in backpass's environment
-because acpx passes that environment on to the OpenCode backpass runs for analysis, which
-must keep its own store and login. Each session is read from the store that lists it; a
-store named twice, or a session copied into two stores, is read once, from the first. A
-configured store that is missing or unreadable is named and skipped. Entries are absolute
-(`~/` is expanded), and like `discovery.hosts` the setting is refused in a repository's
-`.backpassrc.json`.
+`discovery.opencodeStores` in your [personal config](#configuration) names more local OpenCode stores to read beside the default one; it does not affect SSH hosts.
+Each entry is an absolute path (`~/` is expanded) to an OpenCode data directory (holding `opencode.db`) or a database file, such as a consistent copy of the store the Windows OpenCode app keeps, read from WSL.
+It is a config list rather than `XDG_DATA_HOME` or `OPENCODE_DB` in backpass's environment because acpx passes that environment on to the OpenCode backpass runs for analysis, which must keep its own store and login.
+The default store is collected first, followed by configured stores in list order.
+Each session is read from the store that lists it; a store named twice, or a session ID copied into two stores, is read once, from the first store listing it.
+A configured store that is missing or unreadable is named in a warning and skipped; a failure reading the default store still skips the harness.
 
 Hermes collection includes CLI and ACP sessions, plus TUI sessions with an absolute
 `sessions.cwd`. Gateway, cron, and WhatsApp sessions are excluded because their recorded
@@ -812,9 +806,8 @@ overrides when backpass is upgraded. To inherit a global pin there, remove the c
 all-null `analysis` or `synthesis` block from `.backpassrc.json`, then confirm it with
 `backpass status`.
 
-`discovery.hosts` and `discovery.opencodeStores` are the settings a repo file may not carry;
-they belong in the personal configuration file named above. In user scope they default to
-that file's top-level lists, so you name your machines and stores once.
+`discovery.hosts` and `discovery.opencodeStores` are the settings a repo file may not carry; they belong in the personal configuration file named above and are refused by name in `.backpassrc.json`.
+In user scope they default to that file's top-level lists, unless overridden in the `user.discovery` block, so you name your machines and stores once.
 
 That example is the project scope. User scope ignores `.backpassrc.json` and instead
 layers the `"user"` block in `$XDG_CONFIG_HOME/backpass/config.json` (default
