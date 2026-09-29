@@ -25,23 +25,26 @@ const V2_PARENT = "ses_f17ca477affeM7vJpYuwLTunDK";
 
 function withConfigHome(globalConfig, fn) {
   const configHome = fs.mkdtempSync(path.join(os.tmpdir(), "backpass-stores-xdg-"));
-  if (globalConfig) {
-    fs.mkdirSync(path.join(configHome, "backpass"), { recursive: true });
-    fs.writeFileSync(path.join(configHome, "backpass", "config.json"), JSON.stringify(globalConfig));
-  }
   const previous = process.env.XDG_CONFIG_HOME;
-  process.env.XDG_CONFIG_HOME = configHome;
   try {
+    if (globalConfig) {
+      fs.mkdirSync(path.join(configHome, "backpass"), { recursive: true });
+      fs.writeFileSync(path.join(configHome, "backpass", "config.json"), JSON.stringify(globalConfig));
+    }
+    process.env.XDG_CONFIG_HOME = configHome;
     return fn();
   } finally {
-    process.env.XDG_CONFIG_HOME = previous;
+    if (previous === undefined) delete process.env.XDG_CONFIG_HOME;
+    else process.env.XDG_CONFIG_HOME = previous;
+    fs.rmSync(configHome, { recursive: true, force: true });
   }
 }
 
-function tempRepo(repoConfig) {
-  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "backpass-stores-repo-")));
+function tempRepo(t, repoConfig) {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "backpass-stores-repo-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   if (repoConfig) fs.writeFileSync(path.join(root, ".backpassrc.json"), JSON.stringify(repoConfig));
-  return root;
+  return fs.realpathSync(root);
 }
 
 async function captureWarnings(fn) {
@@ -54,10 +57,47 @@ async function captureWarnings(fn) {
   }
 }
 
-test("opencodeStores is personal configuration: expanded, absolute, and refused in a repository file", () => {
+test("config fixtures restore the environment and remove directories on success and failure", () => {
+  const previous = process.env.XDG_CONFIG_HOME;
+  try {
+    for (const value of [undefined, "", "/original/config"]) {
+      for (const fail of [false, true]) {
+        if (value === undefined) delete process.env.XDG_CONFIG_HOME;
+        else process.env.XDG_CONFIG_HOME = value;
+        let configHome;
+        const failure = new Error("fixture callback failed");
+        const run = () =>
+          withConfigHome({}, () => {
+            configHome = process.env.XDG_CONFIG_HOME;
+            assert.ok(fs.existsSync(path.join(configHome, "backpass", "config.json")));
+            if (fail) throw failure;
+            return "result";
+          });
+        if (fail) assert.throws(run, (error) => error === failure);
+        else assert.equal(run(), "result");
+        assert.equal(process.env.XDG_CONFIG_HOME, value);
+        assert.equal(fs.existsSync(configHome), false);
+      }
+    }
+  } finally {
+    if (previous === undefined) delete process.env.XDG_CONFIG_HOME;
+    else process.env.XDG_CONFIG_HOME = previous;
+  }
+});
+
+test("repository fixtures are removed after their owning test", async (t) => {
+  let root;
+  await t.test("fixture owner", (t) => {
+    root = tempRepo(t, {});
+    assert.ok(fs.existsSync(path.join(root, ".backpassrc.json")));
+  });
+  assert.equal(fs.existsSync(root), false);
+});
+
+test("opencodeStores is personal configuration: expanded, absolute, and refused in a repository file", (t) => {
   const home = os.homedir();
   withConfigHome({ discovery: { opencodeStores: ["~/snapshots/opencode", "/srv/opencode.db"] } }, () => {
-    const config = loadConfig(tempRepo());
+    const config = loadConfig(tempRepo(t));
     assert.deepEqual(config.discovery.opencodeStores, [path.join(home, "snapshots", "opencode"), "/srv/opencode.db"]);
     assert.deepEqual(
       loadConfig(null, {}, { kind: "user" }).discovery.opencodeStores,
@@ -66,18 +106,18 @@ test("opencodeStores is personal configuration: expanded, absolute, and refused 
     );
   });
   withConfigHome(null, () => {
-    assert.deepEqual(loadConfig(tempRepo()).discovery.opencodeStores, []);
+    assert.deepEqual(loadConfig(tempRepo(t)).discovery.opencodeStores, []);
     assert.throws(
-      () => loadConfig(tempRepo(), { discovery: { opencodeStores: "~/snap" } }),
+      () => loadConfig(tempRepo(t), { discovery: { opencodeStores: "~/snap" } }),
       /opencodeStores must be an array of paths/,
     );
     assert.throws(
-      () => loadConfig(tempRepo(), { discovery: { opencodeStores: ["snapshots/opencode"] } }),
+      () => loadConfig(tempRepo(t), { discovery: { opencodeStores: ["snapshots/opencode"] } }),
       /opencodeStores entry "snapshots\/opencode" is not an absolute path/,
     );
     let refused = null;
     try {
-      loadConfig(tempRepo({ discovery: { opencodeStores: ["/srv/opencode.db"] } }));
+      loadConfig(tempRepo(t, { discovery: { opencodeStores: ["/srv/opencode.db"] } }));
     } catch (err) {
       refused = err;
     }
@@ -172,8 +212,8 @@ test("a configured store that is missing or unreadable is named and skipped; the
   );
 });
 
-test("discovery associates a configured store's sessions and names a missing store", async () => {
-  const repoRoot = tempRepo();
+test("discovery associates a configured store's sessions and names a missing store", async (t) => {
+  const repoRoot = tempRepo(t);
   const shape = structuredClone(V2);
   for (const session of shape.rows.session_v2) session.directory = repoRoot;
   await withOpencodeHome(
