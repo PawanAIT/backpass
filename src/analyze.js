@@ -165,7 +165,7 @@ function promptPathFor(state, transcript) {
  */
 function sessionRawPath(transcript, state) {
   if (transcript.host || !getAdapter(transcript.harness)?.sqliteBacked || !state?.root) return null;
-  return path.join(state.root, "raw", `${process.pid}-${randomUUID()}.jsonl`);
+  return path.resolve(state.root, "raw", `${process.pid}-${randomUUID()}.jsonl`);
 }
 
 export function pruneSessionRawFiles(stateRoot) {
@@ -178,16 +178,22 @@ export function pruneSessionRawFiles(stateRoot) {
     }
   }
   for (const root of roots) {
-    const dir = path.join(root, "raw");
+    const dir = path.resolve(root, "raw");
     if (!fs.existsSync(dir) || !fs.lstatSync(dir).isDirectory()) continue;
     for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
       if (!entry.isFile()) continue;
       const owner = /^([1-9]\d*)-[0-9a-f-]{36}\.jsonl$/.exec(entry.name);
       if (!owner) continue;
+      const file = path.join(dir, entry.name);
+      const pid = Number(owner[1]);
+      if (pid === process.pid) {
+        if (!activeRawFiles.has(file)) fs.rmSync(file, { force: true });
+        continue;
+      }
       try {
-        process.kill(Number(owner[1]), 0);
+        process.kill(pid, 0);
       } catch (err) {
-        if (err.code === "ESRCH") fs.rmSync(path.join(dir, entry.name), { force: true });
+        if (err.code === "ESRCH") fs.rmSync(file, { force: true });
       }
     }
   }
