@@ -158,11 +158,15 @@ function writeOpencodeStore(sessions) {
     );
   `);
   db.prepare("INSERT INTO project (id, worktree) VALUES (?, ?)").run("p1", realRoot);
-  const at = Date.parse("2026-08-20T10:00:00.000Z");
-  for (const { id, firstUserText } of sessions) {
+  writeOpencodeSessions(db, sessions);
+  db.close();
+}
+
+function writeOpencodeSessions(db, sessions) {
+  for (const { id, firstUserText, parentId = null, at = Date.parse("2026-08-20T10:00:00.000Z") } of sessions) {
     db.prepare(
-      "INSERT INTO session (id, project_id, directory, title, time_created, time_updated) VALUES (?, 'p1', ?, ?, ?, ?)",
-    ).run(id, realRoot, id, at, at);
+      "INSERT INTO session (id, project_id, parent_id, directory, title, time_created, time_updated) VALUES (?, 'p1', ?, ?, ?, ?, ?)",
+    ).run(id, parentId, realRoot, id, at, at);
     // An agent probe (`acpx opencode sessions new`) leaves a session with no messages at all.
     if (firstUserText === null) continue;
     const turns = [
@@ -188,7 +192,6 @@ function writeOpencodeStore(sessions) {
       });
     });
   }
-  db.close();
 }
 
 writePiSession(piDir, "pi-real", "Add the changelog entry.");
@@ -302,6 +305,58 @@ test("malformed OpenCode rows do not suppress valid sessions locally or remotely
     }
   } finally {
     db.prepare("DELETE FROM session WHERE id = ?").run("ses_other");
+    db.close();
+  }
+});
+
+test("OpenCode self ancestry excludes descendants locally and remotely regardless of cutoff", async () => {
+  const { discover } = await import("../src/discovery/remote/probe.js");
+  const db = new DatabaseSync(path.join(fakeHome, ".local", "share", "opencode", "opencode.db"));
+  const old = Date.parse("2026-08-19T10:00:00.000Z");
+  const now = Date.parse("2026-08-21T00:00:00.000Z");
+  const sessions = [
+    { id: "self_grandchild", parentId: "self_child", firstUserText: "Inspect the parser" },
+    { id: "self_child", parentId: "self_old", firstUserText: "Delegate an exploration" },
+    { id: "self_via_empty", parentId: "self_empty", firstUserText: "Read the tests" },
+    { id: "self_empty", parentId: "self_old", firstUserText: null },
+    { id: "self_old", firstUserText: analysisPrompt, at: old },
+    { id: "real_child", parentId: "real_old", firstUserText: "Check the release" },
+    { id: "real_grandchild", parentId: "real_child", firstUserText: "Check the tag" },
+    { id: "real_old", firstUserText: "Fix the release", at: old },
+    { id: "self_under_real", parentId: "real_old", firstUserText: synthesisPrompt },
+    { id: "self_nested", parentId: "self_under_real", firstUserText: "Read the configuration" },
+    { id: "orphan", parentId: "missing", firstUserText: "Continue the task" },
+    { id: "cycle_a", parentId: "cycle_b", firstUserText: "Check A" },
+    { id: "cycle_b", parentId: "cycle_a", firstUserText: "Check B" },
+  ];
+  try {
+    writeOpencodeSessions(db, sessions);
+    for (const since of ["all", "1d"]) {
+      const expected = ["cycle_a", "cycle_b", "orphan", "real_child", "real_grandchild", "ses_opencode_real"];
+      if (since === "all") expected.push("real_old");
+      expected.sort();
+      const config = configFor();
+      config.discovery.since = since;
+      for (let scan = 0; scan < 2; scan++) {
+        const local = await discoverTranscripts({ repo, config, now, harnesses: ["opencode"] });
+        assert.equal(local.perHarness.opencode.error, null);
+        assert.deepEqual(local.transcripts.map((entry) => entry.nativeId).sort(), expected);
+        assert.equal(local.perHarness.opencode.self, since === "all" ? 7 : 6);
+      }
+      const remote = await discover({
+        harnesses: ["opencode"],
+        cutoffMs: since === "all" ? null : now - 24 * 60 * 60 * 1000,
+      });
+      assert.equal(remote.harnesses.opencode.error, null);
+      assert.deepEqual(remote.transcripts.map((entry) => entry.id).sort(), expected);
+      assert.equal(remote.harnesses.opencode.self, since === "all" ? 7 : 6);
+    }
+  } finally {
+    for (const { id } of sessions) {
+      db.prepare("DELETE FROM part WHERE session_id = ?").run(id);
+      db.prepare("DELETE FROM message WHERE session_id = ?").run(id);
+      db.prepare("DELETE FROM session WHERE id = ?").run(id);
+    }
     db.close();
   }
 });

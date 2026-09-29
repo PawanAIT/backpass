@@ -80,6 +80,18 @@ export async function discover({ cutoffMs }) {
       )
       .all(cutoffMs ?? null, cutoffMs ?? 0);
 
+    const ancestorParts =
+      parentSelect && firstUserSelect
+        ? db.prepare(`WITH RECURSIVE ancestors(id) AS (
+            VALUES (?)
+            UNION
+            SELECT s.parent_id FROM session s JOIN ancestors a ON s.id = a.id
+             WHERE s.parent_id IS NOT NULL
+          )
+          SELECT ${FIRST_USER_PART} AS first_user_part
+            FROM session s JOIN ancestors a ON s.id = a.id`)
+        : null;
+
     // A session with no user text recorded nothing: opencode files one for every acpx
     // `sessions new` (backpass's own agent probes among them) and every window opened and
     // closed unused. It is not listed.
@@ -99,7 +111,14 @@ export async function discover({ cutoffMs }) {
       model: null,
       extra: { sessionId: row.id },
       interactionSignals: row.parent_id ? interactionSignals({ parentId: row.parent_id }) : emptyInteractionSignals(),
-      self: opensWithSentinel(safeJsonParse(row.first_user_part)?.text),
+      self:
+        opensWithSentinel(safeJsonParse(row.first_user_part)?.text) ||
+        Boolean(
+          row.parent_id &&
+            ancestorParts
+              ?.all(row.parent_id)
+              .some((ancestor) => opensWithSentinel(safeJsonParse(ancestor.first_user_part)?.text)),
+        ),
     }));
   } finally {
     db.close();

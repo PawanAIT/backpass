@@ -72,7 +72,8 @@ async function descriptorFrom(adapter, row, id) {
   const content = adapter.sqliteBacked ? await adapter.read(row) : null;
   const contentSignature = content ? eventSignature(content) : null;
   const firstUser = content?.events?.find((event) => event?.kind === "message" && event.role === "user");
-  const self = typeof firstUser?.text === "string" && firstUser.text.startsWith(SELF_SESSION_SENTINEL);
+  const self =
+    Boolean(row.self) || (typeof firstUser?.text === "string" && firstUser.text.startsWith(SELF_SESSION_SENTINEL));
   return {
     self,
     descriptor: {
