@@ -1,4 +1,4 @@
-import { analyzeTranscripts, pruneSessionRawFiles } from "../analyze.js";
+import { analyzeTranscripts } from "../analyze.js";
 import { userClaudeSkillsDir } from "../config.js";
 import { UserError, color, info, json, out, warn } from "../logger.js";
 import { memorySurfaceHash, resolveMemoryFiles, separateFileWarning } from "../memory.js";
@@ -80,7 +80,6 @@ export function primaryMemoryFile(repo, config, scope = null) {
 
 export async function runAnalysis(ctx) {
   try {
-    pruneSessionRawFiles(ctx.config.state.root);
     return await runAnalysisCore(ctx);
   } finally {
     await closeRemoteDiscovery(ctx);

@@ -166,37 +166,6 @@ function sessionRawPath(transcript, state) {
   return path.resolve(state.root, "raw", `${process.pid}-${randomUUID()}.jsonl`);
 }
 
-export function pruneSessionRawFiles(stateRoot) {
-  if (!stateRoot) return;
-  const roots = [stateRoot];
-  const nested = path.join(stateRoot, "nested");
-  if (fs.existsSync(nested) && fs.lstatSync(nested).isDirectory()) {
-    for (const entry of fs.readdirSync(nested, { withFileTypes: true })) {
-      if (entry.isDirectory()) roots.push(path.join(nested, entry.name));
-    }
-  }
-  for (const root of roots) {
-    const dir = path.resolve(root, "raw");
-    if (!fs.existsSync(dir) || !fs.lstatSync(dir).isDirectory()) continue;
-    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
-      if (!entry.isFile()) continue;
-      const owner = /^([1-9]\d*)-[0-9a-f-]{36}\.jsonl$/.exec(entry.name);
-      if (!owner) continue;
-      const file = path.join(dir, entry.name);
-      const pid = Number(owner[1]);
-      if (pid === process.pid) {
-        if (!activeRawFiles.has(file)) fs.rmSync(file, { force: true });
-        continue;
-      }
-      try {
-        process.kill(pid, 0);
-      } catch (err) {
-        if (err.code === "ESRCH") fs.rmSync(file, { force: true });
-      }
-    }
-  }
-}
-
 async function analyzeOne({
   transcript,
   memoryFile,
@@ -336,7 +305,6 @@ export async function analyzeTranscripts({
   alsoLoaded = "",
 }) {
   const state = config.state;
-  pruneSessionRawFiles(state.root);
   const pending = [];
   const summary = {
     total: transcripts.length,

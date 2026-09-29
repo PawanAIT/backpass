@@ -291,8 +291,8 @@ dropped, secrets redacted. Typical reduction is **96-99%**.
 The distilled trace ends with the path to the raw transcript, so the analysis agent can open the original when - and only when - a specific claim needs it.
 For a session in a local SQLite store (opencode, hermes, Cursor CLI, Cursor IDE), the analysis call names a file of that session's normalized events instead of the store, which may contain other sessions or require queries against an undocumented schema.
 The file is written with mode `0600` under `raw/` in the active [state directory](#state), only for non-trivial sessions, and removed when the call finishes or during catchable process exits, including SIGINT or SIGTERM.
-After an uncatchable exit such as SIGKILL, the next analysis run reclaims leftover files when their owning process no longer exists or when they reuse the current process's PID without belonging to an active call, including files in nested state directories.
-Files registered to the current run, or owned by another live or uncheckable process, are preserved regardless of age.
+After an uncatchable exit such as SIGKILL, leftover files require manual removal once no analysis is using them.
+Analysis never prunes another run's raw files: PIDs cannot establish ownership or liveness across PID namespaces sharing a state directory.
 
 ### 3. Calculate loss - one cheap call per transcript
 

@@ -8,7 +8,7 @@ import { spawnSync } from "node:child_process";
 import { DatabaseSync } from "node:sqlite";
 import { randomUUID } from "node:crypto";
 
-import { analyzeTranscripts, pruneSessionRawFiles } from "../src/analyze.js";
+import { analyzeTranscripts } from "../src/analyze.js";
 import { State } from "../src/state.js";
 
 /**
@@ -211,7 +211,7 @@ test("a SQLite session's escape hatch is a file of its own events, removed after
 for (const signal of ["SIGINT", "SIGTERM", "SIGKILL"]) {
   for (const nested of [false, true]) {
     test(
-      `a SQLite raw file is removed when ${nested ? "nested" : "root"} analysis receives ${signal}`,
+      `a SQLite raw file is ${signal === "SIGKILL" ? "retained" : "removed"} when ${nested ? "nested" : "root"} analysis receives ${signal}`,
       { skip: process.platform === "win32" },
       () => {
         const home = fs.mkdtempSync(path.join(os.tmpdir(), "backpass-sqlite-raw-home-"));
@@ -247,16 +247,16 @@ for (const signal of ["SIGINT", "SIGTERM", "SIGKILL"]) {
           fs.rmSync(database);
           const recovered = analyze(dir, home);
           assert.equal(recovered.status, 0, `${recovered.stdout}${recovered.stderr}`);
-          assert.equal(JSON.parse(recovered.stdout).summary, null, "cleanup must run even with no transcripts");
+          assert.equal(JSON.parse(recovered.stdout).summary, null);
           assert.equal(fs.readFileSync(activeFile, "utf8"), "live analysis events\n");
         }
-        assert.equal(fs.existsSync(seen.rawPath), false, "interrupting analysis must not retain raw events");
+        assert.equal(fs.existsSync(seen.rawPath), signal === "SIGKILL", "only catchable exits can clean up safely");
       },
     );
   }
 }
 
-test("cached analysis reclaims raw files left by a killed forced run", { skip: process.platform === "win32" }, () => {
+test("cached analysis leaves other runs' raw files alone", { skip: process.platform === "win32" }, () => {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), "backpass-sqlite-raw-home-"));
   const dir = initRepo();
   writeStore(home, dir);
@@ -270,15 +270,15 @@ test("cached analysis reclaims raw files left by a killed forced run", { skip: p
   const cached = analyze(dir, home);
   assert.equal(cached.status, 0, `${cached.stdout}${cached.stderr}`);
   assert.equal(JSON.parse(cached.stdout).summary.cached, 1);
-  assert.equal(fs.existsSync(seenLog), false, "reclaiming an orphan must not require another model call");
-  assert.equal(fs.existsSync(seen.rawPath), false);
+  assert.equal(fs.existsSync(seenLog), false, "a cache hit must not require another model call");
+  assert.equal(fs.existsSync(seen.rawPath), true);
 });
 
-test("analysis reclaims root and nested raw files from a reused PID", () => {
+test("analysis preserves another namespace's root and nested raw files with the same PID", () => {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), "backpass-sqlite-raw-home-"));
   const dir = initRepo();
-  const preload = path.join(binDir, "reused-pid.mjs");
-  const orphanLog = path.join(binDir, "orphans.json");
+  const preload = path.join(binDir, "shared-pid.mjs");
+  const liveLog = path.join(binDir, "live-files.json");
   fs.writeFileSync(
     preload,
     `import fs from "node:fs";
@@ -289,10 +289,10 @@ if (process.argv[1] === ${JSON.stringify(CLI)}) {
     const rawDir = path.join(process.cwd(), ".backpass", subdir);
     fs.mkdirSync(rawDir, { recursive: true });
     const file = path.join(rawDir, process.pid + "-" + randomUUID() + ".jsonl");
-    fs.writeFileSync(file, "orphaned events\\n", { mode: 0o600 });
+    fs.writeFileSync(file, "live analysis events\\n", { mode: 0o600 });
     return file;
   });
-  fs.writeFileSync(${JSON.stringify(orphanLog)}, JSON.stringify(files));
+  fs.writeFileSync(${JSON.stringify(liveLog)}, JSON.stringify(files));
 }
 `,
   );
@@ -301,13 +301,16 @@ if (process.argv[1] === ${JSON.stringify(CLI)}) {
   });
   assert.equal(result.status, 0, `${result.stdout}${result.stderr}`);
   assert.equal(JSON.parse(result.stdout).summary, null);
-  const files = JSON.parse(fs.readFileSync(orphanLog, "utf8"));
+  const files = JSON.parse(fs.readFileSync(liveLog, "utf8"));
   assert.equal(files.length, 2);
-  for (const file of files) assert.equal(fs.existsSync(file), false, `reused PID retained ${file}`);
+  for (const file of files) {
+    assert.equal(fs.existsSync(file), true, `same-PID analysis deleted ${file}`);
+    assert.equal(fs.readFileSync(file, "utf8"), "live analysis events\n");
+  }
 });
 
 for (const nested of [false, true]) {
-  test(`pruning preserves this process's active ${nested ? "nested" : "root"} analysis file`, async (t) => {
+  test(`concurrent analysis preserves this process's active ${nested ? "nested" : "root"} raw file`, async (t) => {
     const home = fs.mkdtempSync(path.join(os.tmpdir(), "backpass-sqlite-raw-home-"));
     const dir = initRepo();
     const database = writeStore(home, dir);
@@ -333,7 +336,14 @@ for (const nested of [false, true]) {
             activeFile = path.join(stateDir, "raw", files[0]);
             const before = fs.readFileSync(activeFile, "utf8");
             for (const root of [rootStateDir, stateDir, state.root]) {
-              pruneSessionRawFiles(root);
+              const concurrent = await analyzeTranscripts({
+                transcripts: [],
+                memoryFile: { path: "AGENTS.md", units: [] },
+                memoryHash: "test-memory",
+                repo: { root: dir },
+                config: { state: new State(dir, { stateDir: root, exclude: false }), jobs: 1 },
+              });
+              assert.equal(concurrent.total, 0);
               assert.equal(fs.readFileSync(activeFile, "utf8"), before);
             }
             return { text: JSON.stringify({ positive: [], negative: [], gaps: [] }) };
