@@ -39,6 +39,10 @@ if (argv.includes("config") && argv.includes("show")) {
 const creating = argv.includes("sessions") && argv.includes("new");
 const status = argv.includes("status");
 const closing = argv.includes("sessions") && argv.includes("close");
+if (creating && process.env.FAKE_ACPX_MODE === "timeout-exit") {
+  process.stderr.write(process.env.FAKE_ACPX_STDERR || "");
+  process.exit(3);
+}
 if (creating && process.env.FAKE_ACPX_MODE === "no-sessions") {
   process.stderr.write("error: unknown command 'sessions'\\n");
   process.exit(2);
@@ -102,6 +106,37 @@ test("a stalled harness no longer claims the effort override is unsupported", as
     },
   );
 });
+
+for (const [stderr, detail] of [
+  ["", ""],
+  ["[acpx] tokens: input=0 output=0 total=0\n", ": [acpx] tokens: input=0 output=0 total=0"],
+  ["\nadapter startup timed out\nextra detail\n", ": adapter startup timed out"],
+]) {
+  test(`acpx session-create timeout names its own limit${detail || " without stderr"}`, async () => {
+    process.env.FAKE_ACPX_MODE = "timeout-exit";
+    process.env.FAKE_ACPX_STDERR = stderr;
+    try {
+      const options = { agent: "codex", sessionName: "backpass-create-timeout-exit", cwd: fixtureDir };
+      const message = `acpx ended the call at its own timeout (exit 3)${detail}`;
+      const named = (err) => {
+        assert.ok(err instanceof UserError, String(err));
+        assert.equal(err.message, message);
+        assert.equal(err.hint, "check with: acpx --verbose codex sessions new --name backpass-probe");
+        return true;
+      };
+      await assert.rejects(() => openSession(options), named);
+      await assert.rejects(() => sessionPrompt({ ...options, effort: "medium", promptFile }), named);
+      assert.deepEqual(await probeSession(options), {
+        verdict: "timeout",
+        detail: message,
+        availableModels: [],
+      });
+    } finally {
+      process.env.FAKE_ACPX_MODE = "hang";
+      delete process.env.FAKE_ACPX_STDERR;
+    }
+  });
+}
 
 test("an adapter that really rejects sessions still reports missing session support", async () => {
   process.env.FAKE_ACPX_MODE = "no-sessions";

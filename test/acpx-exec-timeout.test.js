@@ -37,7 +37,7 @@ if (argv.includes("sessions") || argv.includes("set") || argv.includes("set-mode
 // The one model turn: an exec one-shot or a session prompt, both carrying --file.
 if (argv.includes("--file") && process.env.FAKE_ACPX_MODE === "timeout-exit") {
   // acpx >= 0.19 ends a turn at its --timeout budget itself and exits EXIT_CODES.TIMEOUT.
-  process.stderr.write("[acpx] tokens: input=0 output=0 total=0\\n");
+  process.stderr.write(process.env.FAKE_ACPX_STDERR || "");
   process.exit(3);
 } else if (argv.includes("--file") && process.env.FAKE_ACPX_MODE === "budget-blank") {
   const budgetMs = Number(argv[argv.indexOf("--timeout") + 1]) * 1000;
@@ -147,34 +147,43 @@ test("a blank session prompt clearly short of the budget keeps the empty-output 
 // acpx >= 0.19 no longer exits clean at its budget: it ends the turn and exits with its
 // TIMEOUT code (3). Read generically, a pinned agent's long prompt stopped a whole run
 // as "failed unexpectedly (exit 3)"; named a timeout, it fails only that transcript.
-test("acpx's own timeout exit (3) is named a timeout on both model-turn routes", async () => {
-  process.env.FAKE_ACPX_MODE = "timeout-exit";
-  try {
-    const named = (message) => (err) => {
-      assert.ok(err instanceof AcpxError, String(err));
-      assert.equal(err.message, message);
-      assert.equal(err.timedOut, true);
-      assert.equal(err.code, ACPX_EXIT_TIMEOUT);
-      assert.equal(classifyAcpxFailure(err), null, "a timeout on real work never falls through the ladder");
-      return true;
-    };
-    await assert.rejects(
-      () => execOneShot({ agent: "codex", promptFile, cwd: fixtureDir, timeoutSeconds: 2 }),
-      named("acpx codex exec timed out after 2s"),
-    );
-    await assert.rejects(
-      () =>
-        sessionPrompt({
-          agent: "codex",
-          effort: "medium",
-          sessionName: "backpass-exec-timeout-exit",
-          promptFile,
-          cwd: fixtureDir,
-          timeoutSeconds: 2,
-        }),
-      named("acpx codex session prompt timed out after 2s"),
-    );
-  } finally {
-    process.env.FAKE_ACPX_MODE = "budget-blank";
-  }
-});
+for (const [stderr, detail] of [
+  ["", ""],
+  ["[acpx] tokens: input=0 output=0 total=0\n", ": [acpx] tokens: input=0 output=0 total=0"],
+  ["\nadapter startup timed out\nextra detail\n", ": adapter startup timed out"],
+]) {
+  test(`acpx timeout exit names its own limit on both model-turn routes${detail || " without stderr"}`, async () => {
+    process.env.FAKE_ACPX_MODE = "timeout-exit";
+    process.env.FAKE_ACPX_STDERR = stderr;
+    try {
+      const named = (err) => {
+        assert.ok(err instanceof AcpxError, String(err));
+        assert.equal(err.message, `acpx ended the call at its own timeout (exit 3)${detail}`);
+        assert.equal(err.timedOut, true);
+        assert.equal(err.code, ACPX_EXIT_TIMEOUT);
+        assert.equal(err.stderr, stderr);
+        assert.equal(classifyAcpxFailure(err), null, "a timeout on real work never falls through the ladder");
+        return true;
+      };
+      await assert.rejects(
+        () => execOneShot({ agent: "codex", promptFile, cwd: fixtureDir, timeoutSeconds: 2 }),
+        named,
+      );
+      await assert.rejects(
+        () =>
+          sessionPrompt({
+            agent: "codex",
+            effort: "medium",
+            sessionName: "backpass-exec-timeout-exit",
+            promptFile,
+            cwd: fixtureDir,
+            timeoutSeconds: 2,
+          }),
+        named,
+      );
+    } finally {
+      process.env.FAKE_ACPX_MODE = "budget-blank";
+      delete process.env.FAKE_ACPX_STDERR;
+    }
+  });
+}
