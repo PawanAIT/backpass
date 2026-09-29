@@ -164,7 +164,6 @@ function listV2(db) {
       `SELECT s.id AS id, s.directory AS directory, s.title AS title, s.parent_id AS parent_id,
               s.time_created AS time_created, s.time_updated AS time_updated,
               p.worktree AS worktree,
-              EXISTS (SELECT 1 FROM session_message m WHERE m.session_id = s.id) AS recorded,
               (SELECT MAX(m.time_updated) FROM session_message m WHERE m.session_id = s.id) AS message_time,
               ${V2_FIRST_USER_TEXT} AS first_user_text
          FROM session_v2 s
@@ -174,6 +173,7 @@ function listV2(db) {
   return rows.map((row) => ({
     ...row,
     layout: "v2",
+    recorded: row.message_time !== null,
     parentId: row.parent_id || null,
     mtimeMs: Math.max(Number(row.time_updated) || 0, Number(row.message_time) || 0) || Number(row.time_created) || 0,
     firstUserText: row.first_user_text,

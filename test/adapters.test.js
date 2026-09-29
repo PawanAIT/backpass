@@ -843,15 +843,50 @@ function readFixture(name) {
 async function withOpencodeHome(build, fn) {
   const homeDir = fs.mkdtempSync(path.join(os.tmpdir(), "backpass-opencode-home-"));
   const dbFile = path.join(homeDir, ".local", "share", "opencode", "opencode.db");
-  build(dbFile);
   const previous = process.env.HOME;
-  process.env.HOME = homeDir;
   try {
+    build(dbFile);
+    process.env.HOME = homeDir;
     return await fn(dbFile);
   } finally {
-    process.env.HOME = previous;
+    if (previous === undefined) delete process.env.HOME;
+    else process.env.HOME = previous;
+    fs.rmSync(homeDir, { recursive: true, force: true });
   }
 }
+
+test("opencode test homes are removed and HOME restored on success and failure", async () => {
+  const original = process.env.HOME;
+  try {
+    for (const previous of [undefined, FIXTURES]) {
+      for (const failure of [null, "build", "callback"]) {
+        if (previous === undefined) delete process.env.HOME;
+        else process.env.HOME = previous;
+        let temporaryHome;
+        const error = new Error("fixture failure");
+        const result = withOpencodeHome(
+          (dbFile) => {
+            temporaryHome = path.resolve(dbFile, "../../../..");
+            assert.ok(fs.existsSync(temporaryHome));
+            if (failure === "build") throw error;
+          },
+          async () => {
+            assert.equal(process.env.HOME, temporaryHome);
+            if (failure === "callback") throw error;
+            return "done";
+          },
+        );
+        if (failure) await assert.rejects(result, (caught) => caught === error);
+        else assert.equal(await result, "done");
+        assert.equal(process.env.HOME, previous);
+        assert.equal(fs.existsSync(temporaryHome), false);
+      }
+    }
+  } finally {
+    if (original === undefined) delete process.env.HOME;
+    else process.env.HOME = original;
+  }
+});
 
 const V2_PARENT = "ses_f17ca477affeM7vJpYuwLTunDK";
 const V2_CHILD = "ses_f17c42540ffeM0ZIydCm19byyr";
@@ -888,6 +923,21 @@ test("opencode adapter lists an OpenCode 2 store by session_v2, dated by its new
       );
       assert.ok(!resumed.some((row) => row.id === V2_PARENT));
       assert.deepEqual(await opencode.discover({ cutoffMs: 1790600300000 }), []);
+    },
+  );
+});
+
+test("opencode adapter counts epoch-dated messages as recorded", async () => {
+  const fixture = readFixture("opencode-v2-store.json");
+  for (const message of fixture.rows.session_message) message.time_updated = 0;
+  await withOpencodeHome(
+    (dbFile) => writeOpencodeStore(dbFile, fixture),
+    async () => {
+      const rows = await opencode.discover({ cutoffMs: null });
+      assert.deepEqual(
+        rows.map((row) => row.id).sort(),
+        [V2_RESUMED, V2_SELF, V2_SELF_CHILD, V2_CHILD, V2_PARENT].sort(),
+      );
     },
   );
 });
