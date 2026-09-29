@@ -19,8 +19,8 @@ import { SELF_SESSION_SENTINEL } from "../sentinel.js";
  * every file-backed harness records it (`"text":"..."` / `"content":"..."` /
  * `"message":"..."`). A SQLite-backed store has no per-session file, and its database is
  * never read as one: its pages hold every session's text, so one self session near the
- * start would mark the whole store. acpx drives opencode, so that adapter reads each
- * session's first user text from the store and marks the row `self` instead.
+ * start would mark the whole store. Store-backed detection belongs to the adapter;
+ * see `./adapters/opencode.js` for its `self` marker and ancestry handling.
  */
 
 const HEAD_BYTES = 256 * 1024;
@@ -59,8 +59,7 @@ function isUnder(child, parent) {
 /**
  * @param {{ path?: string | null, cwd?: string | null }} transcript
  * @param {{ stateDir?: string | null, readHead?: boolean }} [options]
- *   `readHead: false` for a SQLite store: its path is the whole database, whose pages
- *   hold every session's text, so one self session in its head would mark them all.
+ *   Set `readHead: false` for SQLite stores; see the module's file-head safety invariant.
  * @returns {boolean}
  */
 export function isSelfSession(transcript, { stateDir, readHead = true } = {}) {

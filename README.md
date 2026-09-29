@@ -263,9 +263,10 @@ the same tiers, sample and cap - see [Your other machines](#your-other-machines)
 Collection is incremental. Codex alone can hold 10,000+ rollouts, so verdicts are cached in
 `.backpass/scan-cache.json` by path, mtime and size - re-scans cost only the new files.
 A harness whose store is missing or has drifted into an unrecognised shape produces a
-warning and is skipped; the run continues. backpass's own loss and gradient-descent calls land
-in these same stores under the repo's cwd; every prompt it sends is tagged, and tagged
-sessions are excluded from the corpus (the `SELF` column in `backpass scan`).
+warning and is skipped; the run continues.
+backpass's own loss and gradient-descent calls land in these same stores under the repo's cwd; every prompt it sends is tagged, and tagged sessions are excluded from the corpus (the `SELF` column in `backpass scan`).
+For OpenCode, this also excludes descendants of tagged sessions, including when the ancestor falls outside `--since`.
+OpenCode sessions with no recorded messages, such as unused agent probes, are not listed or counted as scanned; conversations without user text, such as attachment-only prompts, remain eligible.
 
 Every remaining session is labelled **interactive** or **non-interactive** (`src/interaction.js`).
 Codex `codex exec` / `originator: codex_exec`, Claude SDK, GitHub, action, and CI

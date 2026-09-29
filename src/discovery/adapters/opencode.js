@@ -13,15 +13,16 @@ import { openReadOnly, safeJsonParse } from "./sqlite.js";
  *   message(id, session_id, data)     - data is JSON: {role, model, time, ...}
  *   part(id, message_id, session_id, data) - data is JSON: {type: text|tool|reasoning|...}
  *
- * This is the best-behaved store: association is a SQL predicate on
- * `session.directory`, deleted worktrees included, and both listing and reading are
- * indexed. Older opencode versions used file storage under `storage/`; that layout is
- * handled as a fallback so long-lived machines still yield transcripts.
+ * Listing returns `session.directory`, deleted worktrees included, for the caller's
+ * shared association tiers. Older opencode versions used file storage under `storage/`;
+ * that layout is handled as a fallback so long-lived machines still yield transcripts.
  *
  * acpx drives opencode, so backpass's own analysis and synthesis calls land in this
  * store under the repo's cwd. There is no transcript file for `../self.js` to read, so
  * the listing query reads each session's first user text part and the row is marked
- * `self` when it opens with the sentinel every backpass prompt starts with. A session
+ * `self` when it opens with the sentinel every backpass prompt starts with. Ancestors
+ * are checked without the listing cutoff so delegated work cannot re-enter the corpus
+ * when its backpass-originated parent ages out of the discovery window. A session
  * with no messages at all, such as the one each agent probe creates, is not listed.
  */
 
@@ -36,10 +37,6 @@ export function dbPath() {
   return path.join(storeRoot(), "opencode.db");
 }
 
-/**
- * Discovery is direct: one query returns every session with its directory, and the
- * caller applies the shared association tiers.
- */
 function tableHasColumn(db, table, column) {
   return db
     .prepare(`PRAGMA table_info(${table})`)
@@ -52,7 +49,7 @@ function hasTables(db, ...names) {
   return names.every((name) => check.get(name) !== undefined);
 }
 
-/** The first text part of a session's first user message: where an acpx prompt begins. */
+/** The earliest user text part, skipping malformed JSON and non-text parts. */
 const FIRST_USER_PART = `(SELECT pt.data
      FROM message m
      JOIN part pt ON pt.message_id = m.id
@@ -115,9 +112,9 @@ export async function discover({ cutoffMs }) {
         opensWithSentinel(safeJsonParse(row.first_user_part)?.text) ||
         Boolean(
           row.parent_id &&
-            ancestorParts
-              ?.all(row.parent_id)
-              .some((ancestor) => opensWithSentinel(safeJsonParse(ancestor.first_user_part)?.text)),
+          ancestorParts
+            ?.all(row.parent_id)
+            .some((ancestor) => opensWithSentinel(safeJsonParse(ancestor.first_user_part)?.text)),
         ),
     }));
   } finally {
