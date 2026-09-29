@@ -4,6 +4,7 @@ import { applyDecisions } from "../apply/writer.js";
 import { closeApplySurface, openApplySurface, pollDecisions, renderApplySurface } from "../apply/lavish.js";
 import { reviewInTerminal } from "../apply/terminal.js";
 import { openInBrowser } from "../apply/browser.js";
+import { REJECT_REASONS } from "../state.js";
 import { budgetBar, formatTokens } from "../tokens.js";
 import { describeTarget } from "../target.js";
 
@@ -12,13 +13,53 @@ import { describeTarget } from "../target.js";
  *
  * By default it serves the shipped static template through lavish-axi and waits for one
  * structured decision vector; `--no-ui` keeps the same ACCEPT/REJECT decision in the
- * terminal. `applyDecisions` owns the pre-write freshness, budget, and composition gates;
- * a failing gate records no rejections.
+ * terminal, and `--decisions` takes a vector decided elsewhere. `applyDecisions` owns the
+ * pre-write freshness, budget, and composition gates; a failing gate records no rejections.
  */
 /** A run-level failure carries no `file`; only a per-edit one does. */
 export function formatFailureLine(failure) {
   const location = failure.file ? ` ${failure.file}${failure.edit ? ` (${failure.edit})` : ""}` : "";
   return `${color.red("failed")}${location}: ${failure.error}`;
+}
+
+/**
+ * `--decisions`: the vector the review surface sends (`e1=accepted e2=rejected:too-narrow`),
+ * typed by whoever decided. Unlike the surface's comment box it is parsed strictly - every
+ * token names one edit of this proposal once, a verdict, and at most a known reject reason -
+ * so a typo stops the apply instead of silently leaving an edit undecided.
+ *
+ * @param {string} text
+ * @param {string[]} editIds
+ * @returns {{ decisions: Record<string, string>, reasons: Record<string, string> }}
+ */
+export function parseDecisionsFlag(text, editIds) {
+  const usage = `e.g. --decisions "${editIds.map((id, i) => `${id}=${i ? "rejected:too-narrow" : "accepted"}`).join(" ")}"`;
+  const tokens = String(text).trim().split(/\s+/).filter(Boolean);
+  if (!tokens.length) throw new UserError("--decisions names no edit", usage);
+  /** @type {Record<string, string>} */
+  const decisions = {};
+  /** @type {Record<string, string>} */
+  const reasons = {};
+  for (const token of tokens) {
+    const match = /^(e\d+)=(accepted|rejected)(?::(.+))?$/.exec(token);
+    if (!match) {
+      throw new UserError(`--decisions: "${token}" is not <edit>=accepted or <edit>=rejected[:<reason>]`, usage);
+    }
+    const [, id, verdict, reason] = match;
+    if (!editIds.includes(id)) {
+      throw new UserError(`--decisions: ${id} is not an edit of this proposal`, `its edits: ${editIds.join(", ")}`);
+    }
+    if (decisions[id]) throw new UserError(`--decisions: ${id} is decided twice`);
+    if (reason !== undefined && (verdict !== "rejected" || !REJECT_REASONS.includes(reason))) {
+      throw new UserError(
+        `--decisions: "${token}" carries a reason that is not a reject reason`,
+        `reasons: ${REJECT_REASONS.join(", ")}`,
+      );
+    }
+    decisions[id] = verdict;
+    if (reason) reasons[id] = reason;
+  }
+  return { decisions, reasons };
 }
 
 export async function cmdApply(ctx) {
@@ -65,7 +106,10 @@ export async function cmdApply(ctx) {
   let rejectReasons = {};
   let surfaceFile = null;
 
-  if (ctx.flags["no-ui"]) {
+  if (ctx.flags.decisions !== undefined) {
+    if (ctx.flags["no-ui"]) throw new UserError("--decisions and --no-ui both decide the edits; pass one of them");
+    ({ decisions, reasons: rejectReasons } = parseDecisionsFlag(ctx.flags.decisions, editIds));
+  } else if (ctx.flags["no-ui"]) {
     decisions = await reviewInTerminal(proposal);
   } else {
     surfaceFile = renderApplySurface(proposal, config.state, ctx.version);
