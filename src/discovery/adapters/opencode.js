@@ -57,8 +57,8 @@ const FIRST_USER_PART = `(SELECT pt.data
      FROM message m
      JOIN part pt ON pt.message_id = m.id
     WHERE m.session_id = s.id
-      AND json_extract(m.data, '$.role') = 'user'
-      AND json_extract(pt.data, '$.type') = 'text'
+      AND CASE WHEN json_valid(m.data) THEN json_extract(m.data, '$.role') END = 'user'
+      AND CASE WHEN json_valid(pt.data) THEN json_extract(pt.data, '$.type') END = 'text'
     ORDER BY m.time_created, m.id, pt.id
     LIMIT 1)`;
 

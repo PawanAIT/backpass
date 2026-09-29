@@ -255,6 +255,57 @@ test("the exclusion survives the scan cache (a cached descriptor is still checke
   assert.equal(second.perHarness.pi.self, 1);
 });
 
+test("malformed OpenCode rows do not suppress valid sessions locally or remotely", async (t) => {
+  const { discover } = await import("../src/discovery/remote/probe.js");
+  const db = new DatabaseSync(path.join(fakeHome, ".local", "share", "opencode", "opencode.db"));
+  const at = Date.parse("2026-08-20T09:00:00.000Z");
+  try {
+    db.prepare(
+      "INSERT INTO session (id, project_id, directory, title, time_created, time_updated) VALUES (?, ?, ?, ?, ?, ?)",
+    ).run("ses_other", "other", path.join(fakeHome, "other-repo"), "Other repository", at, at);
+    for (const column of ["message", "part"]) {
+      for (const sessionId of ["ses_opencode_real", "ses_opencode_self", "ses_other"]) {
+        await t.test(`${column} corruption in ${sessionId}`, async () => {
+          db.prepare("INSERT INTO message (id, session_id, time_created, data) VALUES (?, ?, ?, ?)").run(
+            "msg_corrupt",
+            sessionId,
+            at,
+            column === "message" ? "{broken" : JSON.stringify({ role: "user" }),
+          );
+          db.prepare("INSERT INTO part (id, message_id, session_id, time_created, data) VALUES (?, ?, ?, ?, ?)").run(
+            "prt_corrupt",
+            "msg_corrupt",
+            sessionId,
+            at,
+            column === "part" ? "{broken" : JSON.stringify({ type: "text", text: "Unreadable message" }),
+          );
+          try {
+            const config = configFor();
+            for (let scan = 0; scan < 2; scan++) {
+              const local = await discoverTranscripts({ repo, config, harnesses: ["opencode"] });
+              assert.equal(local.perHarness.opencode.error, null);
+              assert.deepEqual(local.transcripts.map((entry) => entry.nativeId), ["ses_opencode_real"]);
+              assert.equal(local.perHarness.opencode.self, 1);
+              assert.equal(local.perHarness.opencode.scanned, 2);
+            }
+            const remote = await discover({ harnesses: ["opencode"], cutoffMs: at });
+            assert.equal(remote.harnesses.opencode.error, null);
+            assert.deepEqual(remote.transcripts.map((entry) => entry.id), ["ses_opencode_real"]);
+            assert.equal(remote.harnesses.opencode.self, 1);
+            assert.equal(remote.harnesses.opencode.scanned, 2);
+          } finally {
+            db.prepare("DELETE FROM part WHERE id = ?").run("prt_corrupt");
+            db.prepare("DELETE FROM message WHERE id = ?").run("msg_corrupt");
+          }
+        });
+      }
+    }
+  } finally {
+    db.prepare("DELETE FROM session WHERE id = ?").run("ses_other");
+    db.close();
+  }
+});
+
 test("isSelfSession is fail-soft on a missing or directory path", () => {
   assert.equal(isSelfSession({ path: path.join(fakeHome, "nope.jsonl") }), false);
   assert.equal(isSelfSession({ path: fakeHome }), false);
