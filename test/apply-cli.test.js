@@ -735,6 +735,8 @@ test("repeated --decisions validate every vector before writing anything", () =>
     { first: "e1=accepted", second: "e1=rejected:too-narrow", message: /e1 is decided twice/ },
     { first: "e1=rejected:too-narrow", second: "e1=accepted", message: /e1 is decided twice/ },
     { first: " ", second: " ", message: /--decisions names no edit/ },
+    { first: " ", second: "e1=accepted", message: /--decisions names no edit/ },
+    { first: "e1=accepted", second: "", message: /--decisions names no edit/ },
   ]) {
     const dir = initRepo();
     proposeExtractions(dir);

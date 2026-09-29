@@ -27,16 +27,21 @@ export function formatFailureLine(failure) {
  * typed by whoever decided. Unlike the surface's comment box it is parsed strictly - every
  * token names one edit of this proposal once, a verdict, and at most a known reject reason -
  * so a typo stops the apply instead of silently leaving an edit undecided.
- * Repeated flags are joined into one vector before parsing.
+ * Repeated flags form one vector, but each must name an edit on its own, so a blank one is
+ * refused rather than dropped.
  *
- * @param {string} text
+ * @param {string | string[]} vectors
  * @param {string[]} editIds
  * @returns {{ decisions: Record<string, string>, reasons: Record<string, string> }}
  */
-export function parseDecisionsFlag(text, editIds) {
+export function parseDecisionsFlag(vectors, editIds) {
   const usage = `e.g. --decisions "${editIds.map((id, i) => `${id}=${i ? "rejected:too-narrow" : "accepted"}`).join(" ")}"`;
-  const tokens = String(text).trim().split(/\s+/).filter(Boolean);
-  if (!tokens.length) throw new UserError("--decisions names no edit", usage);
+  const tokens = [];
+  for (const vector of Array.isArray(vectors) ? vectors : [vectors]) {
+    const own = String(vector).trim().split(/\s+/).filter(Boolean);
+    if (!own.length) throw new UserError("--decisions names no edit", usage);
+    tokens.push(...own);
+  }
   /** @type {Record<string, string>} */
   const decisions = {};
   /** @type {Record<string, string>} */
@@ -109,7 +114,7 @@ export async function cmdApply(ctx) {
 
   if (ctx.flags.decisions !== undefined) {
     if (ctx.flags["no-ui"]) throw new UserError("--decisions and --no-ui both decide the edits; pass one of them");
-    ({ decisions, reasons: rejectReasons } = parseDecisionsFlag(ctx.flags.decisions.join(" "), editIds));
+    ({ decisions, reasons: rejectReasons } = parseDecisionsFlag(ctx.flags.decisions, editIds));
   } else if (ctx.flags["no-ui"]) {
     decisions = await reviewInTerminal(proposal);
   } else {
