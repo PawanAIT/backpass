@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 
 import { associate, globToRegExp, passesStrict } from "../src/discovery/association.js";
-import { isWindowsPath, localPath, parseDriveMounts } from "../src/discovery/paths.js";
+import { isWindowsPath, localPath, parseDriveMounts, wslEnvironment } from "../src/discovery/paths.js";
 import { normalizeRemote } from "../src/repo.js";
 
 /** A repo identity backed by one real directory, so tier-1/tier-3 liveness is genuine. */
@@ -252,24 +252,70 @@ test(
   },
 );
 
-test("wslEnvironment requires a WSL kernel, not just an inherited distro name", async (t) => {
-  const release = t.mock.method(os, "release");
-  for (const kernel of ["6.8.0-generic", "4.4.0-Microsoft", "6.6.87.2-microsoft-standard-WSL2"]) {
-    release.mock.mockImplementation(() => kernel);
-    // Each module instance detects its kernel once, just like a fresh process.
-    const { wslEnvironment } = await import(`../src/discovery/paths.js?kernel=${kernel}`);
-    for (const platform of ["linux", "darwin", "win32"]) {
-      for (const distro of ["Ubuntu", undefined]) {
-        const environment = wslEnvironment({ platform, env: { WSL_DISTRO_NAME: distro } });
-        if (platform !== "linux" || kernel === "6.8.0-generic") {
-          assert.equal(environment, null, `${platform} / ${kernel} / ${distro}`);
-        } else {
-          assert.equal(environment.distro, distro || null);
-          assert.ok(environment.drives instanceof Map);
+test(
+  "unrelated drive-named mounts neither prove WSL nor map Windows drives",
+  { skip: process.platform === "win32" && "Windows spells these paths natively" },
+  () => {
+    const { repo, live } = makeRepo();
+    const target = live.replaceAll("\\", "\\134").replaceAll(" ", "\\040");
+    for (const filesystem of ["fuse.rclone C: rw", "9p C:\\134 rw", "9p C: rw,aname=other"]) {
+      const mountinfo = `10 1 0:10 / ${target} rw - ${filesystem}`;
+      assert.deepEqual([...parseDriveMounts(mountinfo)], [], filesystem);
+      for (const kernel of ["6.8.0-generic", "6.6.87.2-microsoft-standard-WSL2"]) {
+        const wsl = wslEnvironment({ platform: "linux", kernel, env: { WSL_DISTRO_NAME: "Ubuntu" }, mountinfo });
+        if (kernel === "6.8.0-generic") {
+          assert.equal(wsl, null, filesystem);
+          for (const cwd of [`//wsl.localhost/Ubuntu${live}`, `\\\\wsl$\\Ubuntu${live.replaceAll("/", "\\")}`]) {
+            assert.equal(associate({ cwd }, repo, { wsl }), null, filesystem);
+          }
+        }
+        for (const cwd of ["C:\\", "C:/"]) {
+          assert.equal(localPath(cwd, { platform: "linux", wsl }), null, filesystem);
+          assert.equal(associate({ cwd }, repo, { wsl }), null, filesystem);
+          assert.equal(associate({ gitRoot: cwd }, repo, { wsl }), null, filesystem);
         }
       }
     }
+  },
+);
+
+test("wslEnvironment recognizes WSL by its kernel or drive mounts, never by an inherited distro name", () => {
+  const drive = "13 1 0:11 / /mnt/c rw shared:1 - 9p C:\\134 rw,aname=drvfs;path=C:\\;uid=1000";
+  const cases = [
+    { kernel: "6.8.0-generic", mountinfo: "", wsl: false },
+    { kernel: "6.8.0-generic", mountinfo: "16 1 8:32 / / rw - ext4 /dev/sdc rw,relatime", wsl: false },
+    { kernel: "6.12.9-custom", mountinfo: drive, wsl: true },
+    { kernel: "4.4.0-19041-Microsoft", mountinfo: "", wsl: true },
+    { kernel: "6.6.87.2-microsoft-standard-WSL2", mountinfo: "", wsl: true },
+    { kernel: "6.6.87.2-microsoft-standard-WSL2", mountinfo: drive, wsl: true },
+  ];
+  /** @type {NodeJS.Platform[]} */
+  const platforms = ["linux", "darwin", "win32"];
+  for (const { kernel, mountinfo, wsl } of cases) {
+    for (const platform of platforms) {
+      for (const distro of ["Ubuntu", undefined]) {
+        const label = `${platform} / ${kernel} / ${mountinfo === drive ? "C: mounted" : "no drive mounts"} / ${distro}`;
+        const environment = wslEnvironment({ platform, env: { WSL_DISTRO_NAME: distro }, kernel, mountinfo });
+        if (platform !== "linux" || !wsl) {
+          assert.equal(environment, null, label);
+          continue;
+        }
+        assert.equal(environment.distro, distro || null, label);
+        assert.deepEqual([...environment.drives], mountinfo === drive ? [["c", "/mnt/c"]] : [], label);
+        assert.equal(
+          localPath("\\\\wsl.localhost\\Ubuntu\\home\\me", { platform, wsl: environment }),
+          distro ? "/home/me" : null,
+          label,
+        );
+      }
+    }
   }
+});
+
+test("wslEnvironment defaults to this machine's kernel and mount table", { skip: process.platform !== "linux" }, () => {
+  const env = { WSL_DISTRO_NAME: "Ubuntu" };
+  const mountinfo = fs.readFileSync("/proc/self/mountinfo", "utf8");
+  assert.deepEqual(wslEnvironment({ env }), wslEnvironment({ env, kernel: os.release(), mountinfo }));
 });
 
 test("--strict keeps only the deterministic tiers", () => {
