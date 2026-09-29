@@ -151,7 +151,8 @@ function timeoutMessage(result, agent, label, outerMessage) {
  * in the `unsupported` branch and the run stops with "its acpx adapter does not support
  * sessions - upgrade acpx or omit the effort override": three claims that are all false
  * for a harness whose adapter simply had not started yet, and advice that cannot help.
- * `result.timedOut` is the only signal that separates the two, so it is checked first.
+ * `endedAtTimeout` distinguishes this from missing session support; see
+ * `ACPX_EXIT_TIMEOUT` for acpx's own timeout signal.
  */
 function sessionCreateTimeoutError({ agent, acpxAgentArgs, timeoutMs, result }) {
   const seconds = Math.round(timeoutMs / 1000);
@@ -295,9 +296,10 @@ const BLANK_AT_BUDGET_FLOOR = 0.9;
  * `--timeout` budget as the acpx timeout kill it is - by timeout, not `empty-output`.
  *
  * backpass enforces the model budget with an outer kill of its own at budget + 30s
- * (`result.timedOut`), but acpx enforces `--timeout` first: when the harness dies at
- * the budget, `--format quiet` has the process exit clean with blank output, and the
- * outer kill never fires. Read generically that blank result reaches
+ * (`result.timedOut`), but acpx enforces `--timeout` first. Older acpx versions can
+ * exit clean with blank output when the harness dies at the budget, so the outer kill
+ * never fires. Explicit timeout exits are handled separately by `endedAtTimeout`.
+ * Read generically that blank result reaches
  * `assertNonEmptyOutput` as a silent provider failure - an `empty-output` verdict
  * whose hints point at exhausted credits - misreporting a timeout as a provider
  * problem. Wall clock is the only remaining signal: a blank result that spent (almost)
@@ -591,8 +593,8 @@ export async function execOneShot({
  *
  * Resolves to the handle, or throws an `AcpxError` (`unsupported: true` when the adapter
  * has no session support; `sessionPrompt` only falls back when it can preserve the requested overlays).
- * A `sessions new` that backpass itself killed on timeout is raised by name first
- * (`SESSION_CREATE_TIMEOUT_MS`), never as missing session support.
+ * Session-create timeouts are raised as `UserError` by `sessionCreateTimeoutError`,
+ * never as missing session support.
  *
  * @returns {Promise<{ notes: string[],
  *   prompt: (options: { promptFile: string, timeoutSeconds?: number, promptRetries?: number,
