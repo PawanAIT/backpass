@@ -189,11 +189,13 @@ test("localPath refuses a Windows path only where it names no place", () => {
 test("under WSL a drive path is read where /proc/mounts mounts that drive", () => {
   const drives = parseDriveMounts(
     [
-      "drivers /usr/lib/wsl/drivers 9p ro,nosuid,nodev,noatime,aname=drivers;fmask=222;dmask=222 0 0",
-      "C:\\134 /mnt/c 9p rw,noatime,aname=drvfs;path=C:\\;uid=1000;gid=1000;symlinkroot=/mnt/ 0 0",
-      "D:\\134 /win/d\\040drive 9p rw,noatime,aname=drvfs;path=D:\\;uid=1000 0 0",
-      "E: /mnt/e drvfs rw,noatime,uid=1000,gid=1000 0 0",
-      "/dev/sdc / ext4 rw,relatime 0 0",
+      "10 1 0:10 / /usr/lib/wsl/drivers ro - 9p drivers ro,aname=drivers;fmask=222;dmask=222",
+      "11 1 0:11 /Users/me /mnt/me rw - 9p C:\\134 rw,aname=drvfs;path=C:\\",
+      "12 1 0:12 / /Docker/host rw - 9p C:\\134Program\\040Files\\134Docker rw,aname=drvfs",
+      "13 1 0:11 / /mnt/c rw shared:1 - 9p C:\\134 rw,aname=drvfs;path=C:\\;uid=1000",
+      "14 1 0:14 / /win/d\\040drive rw - 9p D:\\134 rw,aname=drvfs;path=D:\\;uid=1000",
+      "15 1 0:15 / /mnt/e rw - drvfs E: rw,uid=1000,gid=1000",
+      "16 1 8:32 / / rw - ext4 /dev/sdc rw,relatime",
     ].join("\n"),
   );
   assert.deepEqual(
@@ -211,6 +213,13 @@ test("under WSL a drive path is read where /proc/mounts mounts that drive", () =
   assert.equal(read("c:\\"), "/mnt/c");
   assert.equal(read("D:\\work\\x.ts"), "/win/d drive/work/x.ts");
   assert.equal(read("E:/a/../b"), "/mnt/e/b");
+  for (const recorded of ["C:\\..", "C:/../..", "C:/a/../../.."]) {
+    assert.equal(read(recorded), "/mnt/c", recorded);
+  }
+  for (const recorded of ["C:\\..\\..\\home\\me\\repo", "C:/../../home/me/repo"]) {
+    assert.equal(read(recorded), "/mnt/c/home/me/repo", recorded);
+  }
+  assert.equal(read("//wsl.localhost/Ubuntu/../../home/me/repo"), "/home/me/repo");
   assert.equal(read("F:\\unmounted"), null, "a drive WSL has not mounted names nothing here");
   assert.equal(read("\\\\wsl.localhost\\Ubuntu\\home\\me\\repo"), "/home/me/repo");
   assert.equal(read("//wsl.localhost/Ubuntu/home/me/repo"), "/home/me/repo");
@@ -224,6 +233,24 @@ test("under WSL a drive path is read where /proc/mounts mounts that drive", () =
     "without WSL_DISTRO_NAME no distro path can be placed",
   );
 });
+
+test(
+  "subdirectory mounts alone never associate a Windows drive path",
+  { skip: process.platform === "win32" && "Windows spells these paths natively" },
+  () => {
+    const { repo, live } = makeRepo();
+    const target = live.replaceAll("\\", "\\134").replaceAll(" ", "\\040");
+    for (const mount of [
+      `11 1 0:11 / ${target} rw - 9p C:\\134Users\\134me rw,aname=drvfs`,
+      `11 1 0:11 /Users/me ${target} rw - 9p C:\\134 rw,aname=drvfs`,
+    ]) {
+      const wsl = { distro: "Ubuntu", drives: parseDriveMounts(mount) };
+      assert.equal(localPath("C:\\work\\repo", { platform: "linux", wsl }), null);
+      assert.equal(associate({ cwd: "C:\\work\\repo" }, repo, { wsl }), null);
+      assert.equal(associate({ gitRoot: "C:/work/repo" }, repo, { wsl }), null);
+    }
+  },
+);
 
 test("wslEnvironment is only WSL on Linux, where WSL_DISTRO_NAME names the distro", () => {
   assert.equal(wslEnvironment({ platform: "darwin", env: { WSL_DISTRO_NAME: "Ubuntu" } }), null);

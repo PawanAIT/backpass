@@ -2,7 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 
 import { readTranscript } from "./discovery/index.js";
-import { localPath } from "./discovery/paths.js";
+import { isWindowsPath, localPath } from "./discovery/paths.js";
 import { UserError, warn } from "./logger.js";
 import {
   memorySetHash,
@@ -50,7 +50,7 @@ import { transcriptIdentity } from "./transcript.js";
  * single-primary run it always was.
  */
 
-export const ATTRIBUTION_VERSION = 5;
+export const ATTRIBUTION_VERSION = 6;
 
 /** Tool-input fields that name a file or directory a session worked in. */
 const PATH_FIELDS = ["file_path", "filePath", "notebook_path", "path"];
@@ -289,10 +289,16 @@ export function workedPaths(transcript, events, roots, { wsl } = {}) {
   const named = toolPaths(events);
   if (!named.length && cwd) named.push({ raw: cwd, workdir: null });
   for (const entry of named) {
-    const raw = localPath(entry.raw, { wsl });
-    const workdir = entry.workdir === null ? null : localPath(entry.workdir, { wsl });
+    let raw = localPath(entry.raw, { wsl });
+    let workdir = entry.workdir === null ? null : localPath(entry.workdir, { wsl });
     if (raw === null || (entry.workdir !== null && workdir === null)) continue;
     if (raw.startsWith("~") || workdir?.startsWith("~")) continue;
+    const windowsBase =
+      workdir && path.isAbsolute(workdir) ? isWindowsPath(entry.workdir) : isWindowsPath(transcript.cwd);
+    if (workdir && !path.isAbsolute(workdir) && isWindowsPath(transcript.cwd)) {
+      workdir = workdir.replaceAll("\\", "/");
+    }
+    if (!path.isAbsolute(raw) && windowsBase) raw = raw.replaceAll("\\", "/");
     const base = workdir ? (path.isAbsolute(workdir) ? workdir : cwd ? path.resolve(cwd, workdir) : null) : cwd;
     if (!path.isAbsolute(raw) && !base) continue;
     const relative = projectWorkPath(path.resolve(base || "", raw), roots);

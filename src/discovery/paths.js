@@ -28,7 +28,7 @@ const WINDOWS_UNC = /^(?:\\\\[^\\/]|\/\/[^\\/])/;
 const DRIVE_PATH = /^([A-Za-z]):(?:[\\/]+(.*))?$/s;
 const UNC_PATH = /^[\\/]{2}([^\\/]+)[\\/]+([^\\/]+)(?:[\\/]+(.*))?$/s;
 const WSL_HOSTS = /^(?:wsl\.localhost|wsl\$)$/i;
-const DRIVE_SOURCE = /^([A-Za-z]):(?:\\|$)/;
+const DRIVE_SOURCE = /^([A-Za-z]):\\?$/;
 
 /** True for a Windows drive or UNC path, whatever system reads it. */
 export function isWindowsPath(recorded) {
@@ -59,7 +59,7 @@ function fromWindows(recorded, { distro, drives }) {
   const drive = recorded.match(DRIVE_PATH);
   if (drive) {
     const mount = drives.get(drive[1].toLowerCase());
-    return mount ? path.posix.join(mount, ...segments(drive[2])) : null;
+    return mount ? path.posix.join(mount, path.posix.resolve("/", ...segments(drive[2])).slice(1)) : null;
   }
   const unc = recorded.match(UNC_PATH);
   if (unc && WSL_HOSTS.test(unc[1]) && distro && unc[2].toLowerCase() === distro.toLowerCase()) {
@@ -74,7 +74,7 @@ function unescapeMountField(field) {
 }
 
 /**
- * Windows drives and where WSL mounted them, from `/proc/mounts` text: drvfs names each
+ * Windows drives and where WSL mounted them, from `/proc/self/mountinfo` text: drvfs names each
  * mount by its drive (`C:\` under WSL 2, `C:` under WSL 1).
  *
  * @param {string} text
@@ -83,8 +83,11 @@ function unescapeMountField(field) {
 export function parseDriveMounts(text) {
   const drives = new Map();
   for (const line of String(text || "").split("\n")) {
-    const [source, target] = line.split(" ");
-    if (!source || !target) continue;
+    const [mount, filesystem] = line.split(" - ");
+    if (!filesystem) continue;
+    const [, , , root, target] = mount.split(" ");
+    const [, source] = filesystem.split(" ");
+    if (root !== "/" || !source || !target) continue;
     const match = unescapeMountField(source).match(DRIVE_SOURCE);
     const letter = match?.[1].toLowerCase();
     if (letter && !drives.has(letter)) drives.set(letter, unescapeMountField(target));
@@ -110,7 +113,7 @@ export function wslEnvironment({ platform = process.platform, env = process.env 
   if (!distro && !wslKernel) return null;
   if (driveTable === null) {
     try {
-      driveTable = parseDriveMounts(fs.readFileSync("/proc/mounts", "utf8"));
+      driveTable = parseDriveMounts(fs.readFileSync("/proc/self/mountinfo", "utf8"));
     } catch {
       driveTable = new Map();
     }
