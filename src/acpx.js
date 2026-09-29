@@ -134,7 +134,12 @@ function endedAtTimeout(result) {
 
 function timeoutMessage(result, agent, label, outerMessage) {
   if (result.timedOut) return outerMessage;
-  const detail = firstLine(stripAcpxNoise(result.stderr));
+  const detail = firstLine(
+    (result.stderr || "")
+      .split("\n")
+      .filter((line) => !line.startsWith("[acpx]") || line.startsWith("[acpx] error:"))
+      .join("\n"),
+  );
   return `acpx ${agent} ${label} ended at its own timeout (exit ${ACPX_EXIT_TIMEOUT})${detail ? `: ${detail}` : ""}`;
 }
 
@@ -678,11 +683,12 @@ export async function openSession({
       if (setMode.code !== 0) {
         // Same degradation as session create: backpass kills the call, acpx exits 130 with
         // no stderr, and `exit 130` would read as the harness rejecting the mode.
-        const detail = setMode.timedOut ? "timed out" : firstLine(setMode.stderr) || `exit ${setMode.code}`;
+        const timedOut = endedAtTimeout(setMode);
+        const detail = timedOut ? "timed out" : firstLine(setMode.stderr) || `exit ${setMode.code}`;
         if (invocation.sessionModeRequired) {
           throw new AcpxError(
             `acpx ${agent} could not enable write session mode=${invocation.sessionMode}: ${detail}`,
-            setMode,
+            { ...setMode, timedOut },
           );
         }
         notes.push(
@@ -695,8 +701,12 @@ export async function openSession({
       if (set.code !== 0) {
         // Same degradation as session create: a killed call exits 130 with no stderr, and
         // `exit 130` would read as the adapter refusing the effort key.
-        const detail = set.timedOut ? "timed out" : firstLine(set.stderr) || `exit ${set.code}`;
-        throw new AcpxError(`acpx ${agent} could not apply invocation-scoped effort=${effort}: ${detail}`, set);
+        const timedOut = endedAtTimeout(set);
+        const detail = timedOut ? "timed out" : firstLine(set.stderr) || `exit ${set.code}`;
+        throw new AcpxError(`acpx ${agent} could not apply invocation-scoped effort=${effort}: ${detail}`, {
+          ...set,
+          timedOut,
+        });
       }
     }
   } catch (err) {

@@ -112,6 +112,11 @@ for (const [scenario, stderr, detail] of [
   ["accounting only", "[acpx] tokens: input=0 output=0 total=0\n", ""],
   ["adapter error", "\nadapter startup timed out\nextra detail\n", ": adapter startup timed out"],
   [
+    "quiet-mode error after accounting",
+    "[acpx] tokens: input=0 output=0 total=0\n[acpx] error: TIMEOUT GEMINI_ACP_STARTUP_TIMEOUT adapter startup timed out\n",
+    ": [acpx] error: TIMEOUT GEMINI_ACP_STARTUP_TIMEOUT adapter startup timed out",
+  ],
+  [
     "noise before adapter error",
     "[acpx] tokens: input=0 output=0 total=0\n[acpx] session closed\nadapter startup timed out\nextra detail\n",
     ": adapter startup timed out",
