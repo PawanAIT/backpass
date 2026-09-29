@@ -352,7 +352,13 @@ test("SQLite content changes invalidate work paths without changing timestamps",
   config.state = new State(repoRoot);
   const scan = () => discoverTranscripts({ repo, config, strict: true });
   update(repoRoot);
-  assert.equal((await scan()).transcripts[0]?.association.tier, 2.5);
+  const placed = (await scan()).transcripts[0];
+  assert.equal(placed?.association.tier, 2.5);
+  assert.equal(
+    placed.contentSignature,
+    null,
+    "the content hash keys only the work-path cache: evidence identity never depends on the tier",
+  );
   update(otherRoot);
   assert.equal((await scan()).transcripts.length, 0, "changed tool input must not reuse the old majority");
   update(repoRoot);
