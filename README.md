@@ -289,7 +289,10 @@ deterministically: user and assistant turns verbatim, each tool call collapsed t
 dropped, secrets redacted. Typical reduction is **96-99%**.
 
 The distilled trace ends with the path to the raw transcript, so the analysis agent can
-open the original when - and only when - a specific claim needs it.
+open the original when - and only when - a specific claim needs it. A session in a SQLite
+store (opencode, hermes, cursor IDE) has no file of its own - its store is one database
+holding every session - so its analysis call names a file of that session's events
+instead, written under `.backpass/raw/` and removed when the call returns.
 
 ### 3. Calculate loss - one cheap call per transcript
 
@@ -861,6 +864,7 @@ exclude (`.git/info/exclude`, written by `backpass init`) rather than the tracke
   rejections.json        edits you turned down, and the evidence behind them
   gap-ledger.json        gap sightings by gap and session, accumulated across runs
   hosts/                 transcripts fetched from SSH hosts (mode 0700), pruned after 30 days unused
+  raw/                   a SQLite-store session's events, only while its analysis call runs
   apply/apply.html       the rendered review surface
 ```
 

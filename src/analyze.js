@@ -4,7 +4,7 @@ import path from "node:path";
 import { extractJson, runModelCall, usageRecord } from "./acpx.js";
 import { distill } from "./distill.js";
 import { classifyInteraction } from "./interaction.js";
-import { readTranscript } from "./discovery/index.js";
+import { getAdapter, readTranscript } from "./discovery/index.js";
 import { instructionUnits, renderInstructionIndex } from "./memory.js";
 import { renderSkillIndexForAnalysis } from "./skills.js";
 import { renderPrompt } from "./prompts.js";
@@ -141,6 +141,31 @@ function promptPathFor(state, transcript) {
   return path.join(state.applyDir, "..", "prompts", `${safeFileName(transcriptIdentity(transcript))}.md`);
 }
 
+/**
+ * The raw-transcript escape hatch must open one session. A file-backed store's path is
+ * that session's file, and a session fetched over ssh already reads from a cached copy of
+ * its own events. A local SQLite store's path is the whole database: every session of
+ * every repository, reachable only through SQL. Handing that to the analysis agent sent
+ * it writing queries against the store - slow enough to time out, and able to read
+ * sessions this repo never associated. So for the length of the call, a local SQLite
+ * session gets a file of its own normalized events, one per line, under
+ * `.backpass/raw/` (mode 0600), which is what the trace footer names.
+ *
+ * @returns {{ path: string, remove: () => void } | null}
+ */
+function sessionRawFile(transcript, raw, state) {
+  if (transcript.host || !getAdapter(transcript.harness)?.sqliteBacked || !state?.root) return null;
+  const dir = path.join(state.root, "raw");
+  fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+  const file = path.join(dir, `${safeFileName(transcriptIdentity(transcript))}.jsonl`);
+  const lines = [
+    JSON.stringify({ harness: transcript.harness, session: transcript.nativeId, model: raw.model || null }),
+    ...raw.events.map((event) => JSON.stringify(event)),
+  ];
+  fs.writeFileSync(file, `${lines.join("\n")}\n`, { mode: 0o600 });
+  return { path: file, remove: () => fs.rmSync(file, { force: true }) };
+}
+
 async function analyzeOne({
   transcript,
   memoryFile,
@@ -153,10 +178,43 @@ async function analyzeOne({
   alsoLoaded = "",
 }) {
   const raw = await readTranscript(transcript);
+  const rawFile = sessionRawFile(transcript, raw, config.state);
+  try {
+    return await analyzeRead({
+      transcript,
+      raw,
+      rawPath: rawFile?.path ?? raw.rawPath,
+      memoryFile,
+      config,
+      repo,
+      modelCwd,
+      slot,
+      openGapIndex,
+      skillIndex,
+      alsoLoaded,
+    });
+  } finally {
+    rawFile?.remove();
+  }
+}
+
+async function analyzeRead({
+  transcript,
+  raw,
+  rawPath,
+  memoryFile,
+  config,
+  repo,
+  modelCwd,
+  slot,
+  openGapIndex,
+  skillIndex,
+  alsoLoaded,
+}) {
   const distilled = distill(raw.events, {
     ...transcript,
     model: raw.model,
-    rawPath: raw.rawPath,
+    rawPath,
   });
 
   emitProgress("analyze:lane", {
