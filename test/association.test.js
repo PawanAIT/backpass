@@ -252,6 +252,33 @@ test(
   },
 );
 
+test(
+  "unrelated drive-named mounts neither prove WSL nor map Windows drives",
+  { skip: process.platform === "win32" && "Windows spells these paths natively" },
+  () => {
+    const { repo, live } = makeRepo();
+    const target = live.replaceAll("\\", "\\134").replaceAll(" ", "\\040");
+    for (const filesystem of ["fuse.rclone C: rw", "9p C:\\134 rw", "9p C: rw,aname=other"]) {
+      const mountinfo = `10 1 0:10 / ${target} rw - ${filesystem}`;
+      assert.deepEqual([...parseDriveMounts(mountinfo)], [], filesystem);
+      for (const kernel of ["6.8.0-generic", "6.6.87.2-microsoft-standard-WSL2"]) {
+        const wsl = wslEnvironment({ platform: "linux", kernel, env: { WSL_DISTRO_NAME: "Ubuntu" }, mountinfo });
+        if (kernel === "6.8.0-generic") {
+          assert.equal(wsl, null, filesystem);
+          for (const cwd of [`//wsl.localhost/Ubuntu${live}`, `\\\\wsl$\\Ubuntu${live.replaceAll("/", "\\")}`]) {
+            assert.equal(associate({ cwd }, repo, { wsl }), null, filesystem);
+          }
+        }
+        for (const cwd of ["C:\\", "C:/"]) {
+          assert.equal(localPath(cwd, { platform: "linux", wsl }), null, filesystem);
+          assert.equal(associate({ cwd }, repo, { wsl }), null, filesystem);
+          assert.equal(associate({ gitRoot: cwd }, repo, { wsl }), null, filesystem);
+        }
+      }
+    }
+  },
+);
+
 test("wslEnvironment recognizes WSL by its kernel or drive mounts, never by an inherited distro name", () => {
   const drive = "13 1 0:11 / /mnt/c rw shared:1 - 9p C:\\134 rw,aname=drvfs;path=C:\\;uid=1000";
   const cases = [

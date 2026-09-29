@@ -85,7 +85,8 @@ export function parseDriveMounts(text) {
     const [mount, filesystem] = line.split(" - ");
     if (!filesystem) continue;
     const [, , , root, target] = mount.split(" ");
-    const [, source] = filesystem.split(" ");
+    const [type, source, options = ""] = filesystem.split(" ");
+    if (type !== "drvfs" && !(type === "9p" && /(?:^|,)aname=drvfs(?:;|,|$)/.test(options))) continue;
     if (root !== "/" || !source || !target) continue;
     const match = unescapeMountField(source).match(DRIVE_SOURCE);
     const letter = match?.[1].toLowerCase();
