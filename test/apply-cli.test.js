@@ -660,6 +660,30 @@ test("--decisions writes accepted edits and remembers a rejection with its reaso
   );
 });
 
+test("repeated --decisions apply one combined vector and preserve reject reasons", () => {
+  for (const [first, second] of [
+    ["e1=accepted", "e2=rejected:too-narrow"],
+    ["e2=rejected:too-narrow", "e1=accepted"],
+  ]) {
+    const dir = initRepo();
+    const [, rejected] = proposeExtractions(dir).edits;
+
+    const applied = runDecided(dir, first, ["--decisions", second]);
+
+    assert.equal(applied.status, 0, applied.output);
+    assert.match(applied.output, /1 accepted · 1 rejected/);
+    const memory = fs.readFileSync(path.join(dir, "AGENTS.md"), "utf8");
+    assert.match(memory, /- Load `ci-details` for this topic\./);
+    assert.doesNotMatch(memory, /release-details/);
+    assert.equal(fs.existsSync(path.join(dir, ".agents/skills/ci-details/SKILL.md")), true);
+    assert.equal(fs.existsSync(path.join(dir, ".agents/skills/release-details")), false);
+    assert.deepEqual(
+      Object.values(rejectionsOf(dir)).map((entry) => [entry.title, entry.reason]),
+      [[rejected.title, "too-narrow"]],
+    );
+  }
+});
+
 test("--decisions leaves an edit it does not name undecided", () => {
   const dir = initRepo();
   const [unnamed, accepted] = proposeExtractions(dir).edits;
@@ -699,6 +723,33 @@ test("a --decisions vector that does not decide cleanly writes nothing", () => {
   assert.equal(both.status, 1, both.output);
   assert.match(both.output, /--decisions and --no-ui both decide the edits/);
   assert.equal(fs.readFileSync(memory, "utf8"), before);
+});
+
+test("repeated --decisions validate every vector before writing anything", () => {
+  for (const { first, second, message } of [
+    { first: "e1=acepted", second: "e2=accepted", message: /"e1=acepted" is not <edit>=accepted/ },
+    { first: "e1=accepted", second: "e2=acepted", message: /"e2=acepted" is not <edit>=accepted/ },
+    { first: "e9=rejected", second: "e2=accepted", message: /e9 is not an edit of this proposal/ },
+    { first: "e1=rejected:nope", second: "e2=accepted", message: /carries a reason that is not a reject reason/ },
+    { first: "e1=accepted", second: "e1=accepted", message: /e1 is decided twice/ },
+    { first: "e1=accepted", second: "e1=rejected:too-narrow", message: /e1 is decided twice/ },
+    { first: "e1=rejected:too-narrow", second: "e1=accepted", message: /e1 is decided twice/ },
+    { first: " ", second: " ", message: /--decisions names no edit/ },
+  ]) {
+    const dir = initRepo();
+    proposeExtractions(dir);
+    const proposalFile = path.join(dir, ".backpass", "proposal.json");
+    const before = fs.readFileSync(proposalFile, "utf8");
+
+    const applied = runDecided(dir, first, ["--decisions", second]);
+
+    assert.equal(applied.status, 1, applied.output);
+    assert.match(applied.output, message);
+    assert.equal(fs.readFileSync(path.join(dir, "AGENTS.md"), "utf8"), MEMORY_TEXT);
+    assert.equal(porcelain(dir), "");
+    assert.deepEqual(rejectionsOf(dir), {});
+    assert.equal(fs.readFileSync(proposalFile, "utf8"), before, "the saved proposal is unchanged");
+  }
 });
 
 test("--decisions belongs to apply alone", () => {

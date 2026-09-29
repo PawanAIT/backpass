@@ -62,7 +62,7 @@ const OPTIONS = {
 
   "dry-run": { type: "boolean" },
   "no-ui": { type: "boolean" },
-  decisions: { type: "string" },
+  decisions: { type: "string", multiple: true },
   "no-open": { type: "boolean" },
   "no-auto-agent": { type: "boolean" },
   force: { type: "boolean" },
@@ -135,7 +135,8 @@ APPLY
   --no-ui                  terminal accept/reject instead of the Lavish surface
   --decisions <vector>     decide without a review surface, e.g. for a script you
                            trust: "e1=accepted e2=rejected:too-narrow"; an edit
-                           it does not name is left undecided
+                           it does not name is left undecided. Repeatable; all vectors
+                           are checked together, and no edit may be decided twice
   --no-open                print the review surface URL without opening a browser
   --dry-run                show what would be written, write nothing
   --force                  re-analyze transcripts that already have fresh evidence,
