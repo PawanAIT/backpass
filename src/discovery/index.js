@@ -44,9 +44,9 @@ export function getAdapter(harness) {
  * results are memoised in `.backpass/scan-cache.json` keyed by path + mtime + size.
  * Only new or changed file headers need re-reading.
  *
- * SQLite-backed stores (opencode, hermes, cursor IDE) obtain descriptors with one
- * indexed query, bypassing the header cache. Both kinds of store use the separate
- * work-path cache in `associateByWork`; checkout ownership is recomputed each scan.
+ * SQLite-backed stores (opencode, hermes, cursor IDE) query session metadata directly,
+ * so they skip the file-header cache. Both kinds of store use the separate work-path
+ * cache in `associateByWork`; checkout ownership is recomputed each scan.
  *
  * Every harness is fail-soft: a store that is missing, unreadable, or has drifted into
  * an unrecognised format produces a named warning and is skipped, never a failed run.
@@ -299,7 +299,12 @@ async function discoverDirect(
   adapter,
   { repo, config, cutoffMs, strict, stats, associateFn, stateDir, userFilter, tier },
 ) {
-  const rows = await adapter.discover({ cutoffMs, repo, config });
+  const rows = await adapter.discover({
+    cutoffMs,
+    repo,
+    config,
+    warn: (message) => warn(`${adapter.name}: ${message}`),
+  });
   const out = [];
   const pending = [];
   for (const row of rows) {
@@ -318,7 +323,9 @@ async function discoverDirect(
       stats.skipped += 1;
       continue;
     }
-    if (isSelfSession(transcript, { stateDir })) {
+    // A SQLite store has no per-session file to inspect; its adapter marks backpass's own
+    // sessions from the store itself (see ./self.js).
+    if (row.self || isSelfSession(transcript, { stateDir, readHead: !adapter.sqliteBacked })) {
       stats.self += 1;
       continue;
     }
@@ -450,7 +457,7 @@ async function associateByWork(adapter, pending, { work, stats, stateDir }) {
       association.projectRoot = work.repo.root;
     }
     const transcript = toTranscript(adapter, { ...row, contentSignature: content }, association, id);
-    if (isSelfSession(transcript, { stateDir })) {
+    if (row.self || isSelfSession(transcript, { stateDir, readHead: !adapter.sqliteBacked })) {
       stats.self += 1;
       continue;
     }
