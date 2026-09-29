@@ -273,7 +273,11 @@ test(
       { kind: "tool", input: { filePath: "C:\\Users\\me\\notes.md" } },
       { kind: "tool", input: { path: "\\\\server\\share\\apps\\api\\x.ts" } },
       { kind: "tool", input: { path: "src/orders.ts", workdir: "C:\\work\\apps\\api" } },
-      { kind: "tool", input: "*** Begin Patch\n*** Update File: D:/work/apps/api/y.ts\n*** End Patch" },
+      {
+        kind: "tool",
+        name: "apply_patch",
+        input: "*** Begin Patch\n*** Update File: D:/work/apps/api/y.ts\n*** End Patch",
+      },
       { kind: "tool", input: { path: "apps/api/handler.ts" } },
     ];
     const notWsl = { wsl: null };
@@ -328,9 +332,14 @@ test(
         for (const field of ["workdir", "cwd"]) {
           for (const raw of [...absolutePaths, "apps/api/x.ts", "apps\\api\\x.ts", "\\apps\\api\\x.ts"]) {
             for (const input of inputs(raw)) {
-              const paths = workedPaths({ cwd }, [{ kind: "tool", input: { ...input, [field]: workdir } }], roots, {
-                wsl,
-              });
+              const paths = workedPaths(
+                { cwd },
+                [{ kind: "tool", name: input.patch ? "apply_patch" : "read", input: { ...input, [field]: workdir } }],
+                roots,
+                {
+                  wsl,
+                },
+              );
               const independent = absolutePaths.includes(raw);
               assert.deepEqual(paths, independent ? ["apps/api/x.ts"] : [], `${cwd} / ${workdir} / ${raw}`);
               assert.equal(
@@ -366,17 +375,29 @@ test(
     ];
     for (const cwd of bases) {
       for (const input of inputs("apps\\api\\x.ts")) {
-        const paths = workedPaths({ cwd }, [{ kind: "tool", input }], roots, { wsl });
+        const paths = workedPaths(
+          { cwd },
+          [{ kind: "tool", name: input.patch ? "apply_patch" : "read", input }],
+          roots,
+          { wsl },
+        );
         assert.deepEqual(paths, ["apps/api/x.ts"]);
         assert.equal(owningFile(["session"], [API], new Map([["session", paths]])), API.path);
       }
       const patch = "*** Begin Patch\n*** Update File: apps\\api\\x.ts\n*** End Patch";
-      assert.deepEqual(workedPaths({ cwd }, [{ kind: "tool", input: patch }], roots, { wsl }), ["apps/api/x.ts"]);
+      assert.deepEqual(workedPaths({ cwd }, [{ kind: "tool", name: "apply_patch", input: patch }], roots, { wsl }), [
+        "apps/api/x.ts",
+      ]);
       for (const field of ["workdir", "cwd"]) {
         for (const input of inputs("x.ts")) {
           for (const workdir of ["apps\\api", "apps/api", `${cwd}/apps/api`]) {
             assert.deepEqual(
-              workedPaths({ cwd }, [{ kind: "tool", input: { ...input, [field]: workdir } }], roots, { wsl }),
+              workedPaths(
+                { cwd },
+                [{ kind: "tool", name: input.patch ? "apply_patch" : "read", input: { ...input, [field]: workdir } }],
+                roots,
+                { wsl },
+              ),
               ["apps/api/x.ts"],
             );
           }
@@ -423,7 +444,12 @@ test(
     for (const { base, rooted } of cases) {
       const cwd = `${base}\\sub`;
       for (const input of inputs(`${rooted}\\x.ts`)) {
-        const paths = workedPaths({ cwd }, [{ kind: "tool", input }], [root], { wsl });
+        const paths = workedPaths(
+          { cwd },
+          [{ kind: "tool", name: typeof input === "string" || input.patch ? "apply_patch" : "read", input }],
+          [root],
+          { wsl },
+        );
         assert.deepEqual(paths, ["apps/api/x.ts"]);
         assert.equal(owningFile(["session"], [API], new Map([["session", paths]])), API.path);
       }
@@ -431,7 +457,12 @@ test(
         for (const workdir of [rooted, "..\\apps\\api", `${base}\\apps\\api`]) {
           for (const input of inputs("x.ts").filter((input) => typeof input === "object")) {
             assert.deepEqual(
-              workedPaths({ cwd }, [{ kind: "tool", input: { ...input, [field]: workdir } }], [root], { wsl }),
+              workedPaths(
+                { cwd },
+                [{ kind: "tool", name: input.patch ? "apply_patch" : "read", input: { ...input, [field]: workdir } }],
+                [root],
+                { wsl },
+              ),
               ["apps/api/x.ts"],
             );
           }
@@ -497,7 +528,7 @@ test("attribution caches local paths by resolver version and never places remote
   const first = await attributeTranscripts([local, remote, unreadable], repo, state);
   assert.deepEqual(first.get(transcriptIdentity(local)), ["apps/api/src/orders.ts"]);
   assert.equal(first.get(transcriptIdentity(remote)), null, "a session from another machine is never placed");
-  assert.deepEqual(first.get(transcriptIdentity(unreadable)), [""], "no readable tool call: the cwd alone places it");
+  assert.equal(first.get(transcriptIdentity(unreadable)), null, "an unreadable transcript cannot place work");
 
   const cachePath = path.join(state.root, "nested", "attribution.json");
   for (const workPathsVersion of [undefined, WORK_PATHS_VERSION - 1]) {

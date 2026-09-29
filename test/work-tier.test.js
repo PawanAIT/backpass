@@ -4,12 +4,15 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
+import { DatabaseSync } from "node:sqlite";
+import { setLoggerSink } from "../src/logger.js";
 
 import { passesStrict } from "../src/discovery/association.js";
 import { ADAPTERS, discoverTranscripts } from "../src/discovery/index.js";
 import { workPaths, workTier } from "../src/discovery/work.js";
 import { loadConfig } from "../src/config.js";
 import { resolveRepo } from "../src/repo.js";
+import { State } from "../src/state.js";
 
 /**
  * Tier 2.5: a session that started in no checkout is placed by where its tool calls
@@ -122,6 +125,32 @@ test("checkout ownership follows symlinks for cwd, recorded roots, and tool path
   assert.equal(tier.associate([path.join(repoRoot, "src/app.ts"), fileLink]), null);
 });
 
+test("physical path votes are distinct on both sides, including file links and nonexistent descendants", () => {
+  const { repo, repoRoot, otherRoot, scratch } = layout();
+  const tier = workTier(repo);
+  for (const [root, opponent] of [
+    [repoRoot, otherRoot],
+    [otherRoot, repoRoot],
+  ]) {
+    const dirLink = path.join(scratch, path.basename(root));
+    fs.symlinkSync(path.join(root, "src"), dirLink, "junction");
+    const fileLink = `${dirLink}.ts`;
+    fs.symlinkSync(path.join(root, "src/app.ts"), fileLink, "file");
+    for (const file of ["app.ts", "missing/new.ts"]) {
+      const paths = [path.join(root, "src", file), path.join(dirLink, file), path.join(opponent, "src/app.ts")];
+      if (file === "app.ts") paths.push(fileLink);
+      assert.equal(tier.associate(paths), null, "aliases cannot turn a tie into a majority on either side");
+    }
+    const paths = [
+      path.join(root, "src/app.ts"),
+      path.join(dirLink, "app.ts"),
+      path.join(opponent, "src/app.ts"),
+      path.join(opponent, "src/new.ts"),
+    ];
+    assert.equal(tier.associate(paths)?.tier ?? null, opponent === repoRoot ? 2.5 : null);
+  }
+});
+
 test("work paths are the structured tool-call paths, resolved the way nested attribution resolves them", () => {
   const { repoRoot, scratch } = layout();
   const unc = `\\\\wsl.localhost\\Ubuntu${repoRoot.replaceAll("/", "\\")}`;
@@ -147,7 +176,7 @@ test("work paths are the structured tool-call paths, resolved the way nested att
   ]);
 });
 
-function writePiSession(home, { id, cwd, paths }) {
+function writePiSession(home, { id, cwd, paths = [], tools = [] }) {
   const dir = path.join(home, ".pi", "agent", "sessions", `-${cwd.replaceAll("/", "-")}--`);
   fs.mkdirSync(dir, { recursive: true });
   const file = path.join(dir, `2026-09-29T10-00-00-000Z_${id}.jsonl`);
@@ -158,7 +187,10 @@ function writePiSession(home, { id, cwd, paths }) {
       type: "message",
       message: {
         role: "assistant",
-        content: paths.map((p, index) => ({ type: "toolCall", id: `t${index}`, name: "edit", arguments: { path: p } })),
+        content: [
+          ...paths.map((p, index) => ({ type: "toolCall", id: `t${index}`, name: "edit", arguments: { path: p } })),
+          ...tools.map((tool, index) => ({ type: "toolCall", id: `extra${index}`, ...tool })),
+        ],
       },
     },
   ];
@@ -263,6 +295,130 @@ function cachedDiscovery(t, direct) {
     scan: (options = {}) => discoverTranscripts({ repo, config, strict: true, ...options }),
   };
 }
+
+test("discovery retries an actual file read failure and names it", async (t) => {
+  const fixture = cachedDiscovery(t, false);
+  const warnings = [];
+  setLoggerSink((line) => warnings.push(line));
+  t.after(() => setLoggerSink(null));
+  const originalRead = fs.readFileSync;
+  const diskRead = t.mock.method(fs, "readFileSync", function (file, ...args) {
+    if (file === fixture.file) throw new Error("EACCES: transcript unreadable");
+    return originalRead.call(this, file, ...args);
+  });
+  const failed = await fixture.scan();
+  diskRead.mock.restore();
+  assert.equal(failed.transcripts.length, 0);
+  assert.deepEqual(fixture.cache().work || {}, {});
+  assert.ok(warnings.some((line) => line.includes("pi") && line.includes("cached") && line.includes("EACCES")));
+  assert.equal((await fixture.scan()).transcripts[0]?.association.tier, 2.5);
+});
+
+test("SQLite content changes invalidate work paths without changing timestamps", async (t) => {
+  const { base, repo, repoRoot, otherRoot, scratch } = layout();
+  const home = path.join(base, "hermes");
+  fs.mkdirSync(home);
+  const previousHome = process.env.HERMES_HOME;
+  process.env.HERMES_HOME = home;
+  t.after(() => {
+    if (previousHome === undefined) delete process.env.HERMES_HOME;
+    else process.env.HERMES_HOME = previousHome;
+  });
+  const db = new DatabaseSync(path.join(home, "state.db"));
+  t.after(() => db.close());
+  db.exec(`
+    CREATE TABLE sessions (id TEXT, source TEXT, model TEXT, model_config TEXT,
+      system_prompt TEXT, title TEXT, started_at REAL, ended_at REAL, cwd TEXT);
+    CREATE TABLE messages (id INTEGER, session_id TEXT, role TEXT, content TEXT,
+      tool_call_id TEXT, tool_calls TEXT, tool_name TEXT, timestamp REAL);
+  `);
+  db.prepare("INSERT INTO sessions VALUES ('s', 'cli', NULL, NULL, NULL, NULL, 100, 100, ?)").run(scratch);
+  db.exec("INSERT INTO messages VALUES (1, 's', 'assistant', '', NULL, NULL, NULL, 100)");
+  const update = (root) =>
+    db
+      .prepare("UPDATE messages SET tool_calls = ?")
+      .run(
+        JSON.stringify([
+          { id: "t", function: { name: "read", arguments: JSON.stringify({ path: path.join(root, "src/app.ts") }) } },
+        ]),
+      );
+  const original = ADAPTERS.hermes;
+  ADAPTERS.hermes = { ...original };
+  const read = t.mock.method(ADAPTERS.hermes, "read");
+  t.after(() => {
+    ADAPTERS.hermes = original;
+  });
+  const config = loadConfig(repoRoot, { discovery: { harnesses: ["hermes"], since: "all" } });
+  config.state = new State(repoRoot);
+  const scan = () => discoverTranscripts({ repo, config, strict: true });
+  update(repoRoot);
+  assert.equal((await scan()).transcripts[0]?.association.tier, 2.5);
+  update(otherRoot);
+  assert.equal((await scan()).transcripts.length, 0, "changed tool input must not reuse the old majority");
+  update(repoRoot);
+  assert.equal((await scan()).transcripts[0]?.association.tier, 2.5);
+  await scan();
+  assert.equal(read.mock.callCount(), 4, "each SQLite candidate is read only once per scan, including cache hits");
+
+  const prior = config.state.readScanCache().work;
+  const warnings = [];
+  setLoggerSink((line) => warnings.push(line));
+  t.after(() => setLoggerSink(null));
+  // Discovery still works, but the read query fails after its header was classified.
+  db.exec("ALTER TABLE messages RENAME COLUMN tool_calls TO broken");
+  assert.equal((await scan()).transcripts.length, 0);
+  assert.deepEqual(config.state.readScanCache().work, prior);
+  assert.ok(warnings.some((line) => line.includes("hermes") && line.includes("tool_calls")));
+  db.exec("ALTER TABLE messages RENAME COLUMN broken TO tool_calls");
+  assert.equal((await scan()).transcripts[0]?.association.tier, 2.5);
+});
+
+test("discovery counts symlink aliases once and never treats shell patch text as work", async (t) => {
+  const { base, repo, repoRoot, otherRoot, scratch } = layout();
+  const home = path.join(base, "home");
+  const original = ADAPTERS.pi;
+  const files = [];
+  ADAPTERS.pi = {
+    ...original,
+    enumerate: () =>
+      files.map((file) => ({
+        key: file,
+        path: file,
+        mtimeMs: fs.statSync(file).mtimeMs,
+        bytes: fs.statSync(file).size,
+      })),
+  };
+  t.after(() => {
+    ADAPTERS.pi = original;
+  });
+  const link = path.join(scratch, "alias");
+  fs.symlinkSync(path.join(repoRoot, "src"), link, "junction");
+  for (const file of ["app.ts", "missing/new.ts"]) {
+    files.push(
+      writePiSession(home, {
+        id: file.replaceAll("/", "-"),
+        cwd: scratch,
+        paths: [path.join(repoRoot, "src", file), path.join(link, file), path.join(otherRoot, "src/app.ts")],
+      }),
+    );
+  }
+  const patch = `*** Begin Patch\n*** Add File: ${path.join(repoRoot, "src/new.ts")}\n*** End Patch`;
+  for (const [id, name, args] of [
+    ["shell-object", "shell", { command: `cat <<'PATCH'\n${patch}\nPATCH` }],
+    ["shell-string", "shell", patch],
+    ["write-content", "write", { path: path.join(scratch, "example.md"), content: patch }],
+    ["real-patch", "apply_patch", patch],
+    ["object-patch", "apply_patch", { patch, workdir: scratch }],
+  ]) {
+    files.push(writePiSession(home, { id, cwd: scratch, tools: [{ name, arguments: args }] }));
+  }
+  const config = loadConfig(repoRoot, { discovery: { harnesses: ["pi"], since: "all" } });
+  config.state = new State(repoRoot);
+  for (let scan = 0; scan < 2; scan++) {
+    const result = await discoverTranscripts({ repo, config, strict: true });
+    assert.deepEqual(result.transcripts.map((item) => item.nativeId).sort(), ["object-patch", "real-patch"]);
+  }
+});
 
 for (const direct of [false, true]) {
   const store = direct ? "direct store" : "file store";

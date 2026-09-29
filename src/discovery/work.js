@@ -30,7 +30,7 @@ const PATH_FIELDS = ["file_path", "filePath", "notebook_path", "path"];
 const PATCH_FILE = /^\*\*\* (?:Add File|Update File|Delete File|Move to): (.+)$/gm;
 
 export const WORK_TIER = 2.5;
-export const WORK_PATHS_VERSION = 1;
+export const WORK_PATHS_VERSION = 2;
 
 /** The paths a session's tool calls name, as recorded. */
 export function toolPaths(events) {
@@ -43,7 +43,7 @@ export function toolPaths(events) {
     if (event?.kind !== "tool") continue;
     const input = event.input;
     if (typeof input === "string") {
-      patchFiles(input, null);
+      if (event.name === "apply_patch") patchFiles(input, null);
       continue;
     }
     if (!input || typeof input !== "object") continue;
@@ -52,7 +52,9 @@ export function toolPaths(events) {
     for (const key of PATH_FIELDS) {
       if (typeof input[key] === "string" && input[key].trim()) out.push({ raw: input[key].trim(), workdir });
     }
-    for (const value of Object.values(input)) if (typeof value === "string") patchFiles(value, workdir);
+    if (event.name === "apply_patch") {
+      for (const value of Object.values(input)) if (typeof value === "string") patchFiles(value, workdir);
+    }
   }
   return out;
 }
@@ -237,7 +239,8 @@ export function workTier(repo, { wsl, cloneOf = (dir) => isCloneOf(dir, repo.clo
       let here = 0;
       let elsewhere = 0;
       const places = new Map();
-      for (const p of paths) {
+      // Resolve at voting time, not in the content cache: links can change between scans.
+      for (const p of new Set(paths.map(realpathDeepest))) {
         const checkout = locate(p);
         if (!checkout) continue;
         if (!isOurs(checkout)) {

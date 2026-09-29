@@ -1,3 +1,4 @@
+import crypto from "node:crypto";
 import fs from "node:fs";
 
 import * as claude from "./adapters/claude.js";
@@ -404,29 +405,40 @@ function discoverFiles(
 
 /**
  * Tier 2.5 for the sessions a scan handed back as candidates: read each one's work paths
- * (cached by content signature, so a scan reads only new and changed sessions) and keep
- * the ones whose work was in this repository. Always deterministic, so `--strict` keeps
+ * (cached by content signature) and keep the ones whose work was in this repository.
+ * SQLite timestamps need not advance when tool inputs change, so those candidates are
+ * read once per scan and signed from their events before consulting the path cache.
+ * Always deterministic, so `--strict` keeps
  * them; backpass's own sessions are dropped as on every other tier.
  */
 async function associateByWork(adapter, pending, { work, stats, stateDir }) {
   const out = [];
   for (const { row, id } of pending) {
     const draft = toTranscript(adapter, row, null, id);
-    const content = draft.contentSignature || `${draft.mtimeMs}:${draft.bytes}`;
-    const prior = work.entries[draft.identity];
-    let paths =
-      prior?.version === WORK_PATHS_VERSION && prior.content === content && Array.isArray(prior.paths)
-        ? prior.paths
-        : null;
-    if (!paths) {
-      try {
-        paths = workPaths(draft, (await readTranscript(draft)).events);
-      } catch {
-        stats.skipped += 1;
-        continue;
+    let paths;
+    let content;
+    try {
+      const result = adapter.sqliteBacked ? await readTranscript(draft) : null;
+      content = result
+        ? crypto
+            .createHash("sha256")
+            .update(JSON.stringify([draft.cwd, result.events]))
+            .digest("hex")
+        : draft.contentSignature || `${draft.mtimeMs}:${draft.bytes}`;
+      const prior = work.entries[draft.identity];
+      paths =
+        prior?.version === WORK_PATHS_VERSION && prior.content === content && Array.isArray(prior.paths)
+          ? prior.paths
+          : null;
+      if (!paths) {
+        paths = workPaths(draft, (result || (await readTranscript(draft))).events);
+        work.entries[draft.identity] = { version: WORK_PATHS_VERSION, content, paths };
+        work.changed = true;
       }
-      work.entries[draft.identity] = { version: WORK_PATHS_VERSION, content, paths };
-      work.changed = true;
+    } catch (err) {
+      warn(`${adapter.name}: work paths unreadable for ${draft.nativeId} (${err.message}) - session skipped`);
+      stats.skipped += 1;
+      continue;
     }
     const association = work.tier.associate(paths);
     if (!association) {
@@ -437,7 +449,7 @@ async function associateByWork(adapter, pending, { work, stats, stateDir }) {
       association.project = work.repo.root;
       association.projectRoot = work.repo.root;
     }
-    const transcript = toTranscript(adapter, row, association, id);
+    const transcript = toTranscript(adapter, { ...row, contentSignature: content }, association, id);
     if (isSelfSession(transcript, { stateDir })) {
       stats.self += 1;
       continue;
