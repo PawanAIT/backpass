@@ -11,8 +11,10 @@ import { passesStrict } from "../src/discovery/association.js";
 import { ADAPTERS, discoverTranscripts } from "../src/discovery/index.js";
 import { workPaths, workTier } from "../src/discovery/work.js";
 import { loadConfig } from "../src/config.js";
+import { associateUser } from "../src/scope.js";
 import { resolveRepo } from "../src/repo.js";
-import { State } from "../src/state.js";
+import { State, evidenceKey, isEvidenceFresh } from "../src/state.js";
+import { attributeTranscripts } from "../src/nested.js";
 
 /**
  * Tier 2.5: a session that started in no checkout is placed by where its tool calls
@@ -314,7 +316,7 @@ test("discovery retries an actual file read failure and names it", async (t) => 
   assert.equal((await fixture.scan()).transcripts[0]?.association.tier, 2.5);
 });
 
-test("SQLite content changes invalidate work paths without changing timestamps", async (t) => {
+test("SQLite content changes invalidate work paths, evidence, and attribution without changing timestamps", async (t) => {
   const { base, repo, repoRoot, otherRoot, scratch } = layout();
   const home = path.join(base, "hermes");
   fs.mkdirSync(home);
@@ -334,12 +336,12 @@ test("SQLite content changes invalidate work paths without changing timestamps",
   `);
   db.prepare("INSERT INTO sessions VALUES ('s', 'cli', NULL, NULL, NULL, NULL, 100, 100, ?)").run(scratch);
   db.exec("INSERT INTO messages VALUES (1, 's', 'assistant', '', NULL, NULL, NULL, 100)");
-  const update = (root) =>
+  const update = (root, file = "src/app.ts") =>
     db
       .prepare("UPDATE messages SET tool_calls = ?")
       .run(
         JSON.stringify([
-          { id: "t", function: { name: "read", arguments: JSON.stringify({ path: path.join(root, "src/app.ts") }) } },
+          { id: "t", function: { name: "read", arguments: JSON.stringify({ path: path.join(root, file) }) } },
         ]),
       );
   const original = ADAPTERS.hermes;
@@ -350,21 +352,49 @@ test("SQLite content changes invalidate work paths without changing timestamps",
   });
   const config = loadConfig(repoRoot, { discovery: { harnesses: ["hermes"], since: "all" } });
   config.state = new State(repoRoot);
-  const scan = () => discoverTranscripts({ repo, config, strict: true });
+  const scan = (options = {}) => discoverTranscripts({ repo, config, strict: true, ...options });
   update(repoRoot);
   const placed = (await scan()).transcripts[0];
   assert.equal(placed?.association.tier, 2.5);
-  assert.equal(
-    placed.contentSignature,
-    null,
-    "the content hash keys only the work-path cache: evidence identity never depends on the tier",
-  );
+  const evidence = { status: "ok", key: evidenceKey(placed, "memory") };
+  assert.deepEqual((await attributeTranscripts([placed], repo, config.state)).get(placed.identity), ["src/app.ts"]);
+  assert.equal(isEvidenceFresh(evidence, (await scan()).transcripts[0], "memory"), true);
+  update(repoRoot, "src/new.ts");
+  const changed = (await scan()).transcripts[0];
+  assert.equal(changed.mtimeMs, placed.mtimeMs);
+  assert.equal(changed.bytes, placed.bytes);
+  assert.equal(isEvidenceFresh(evidence, changed, "memory"), false, "changed calls invalidate analysis evidence");
+  assert.deepEqual((await attributeTranscripts([changed], repo, config.state)).get(changed.identity), ["src/new.ts"]);
+  read.mock.resetCalls();
   update(otherRoot);
   assert.equal((await scan()).transcripts.length, 0, "changed tool input must not reuse the old majority");
   update(repoRoot);
   assert.equal((await scan()).transcripts[0]?.association.tier, 2.5);
   await scan();
-  assert.equal(read.mock.callCount(), 4, "each SQLite candidate is read only once per scan, including cache hits");
+  assert.equal(read.mock.callCount(), 3, "each SQLite candidate is read only once per scan, including cache hits");
+
+  const userScope = { kind: "user", associate: associateUser };
+  const userPlaced = (await scan({ scope: userScope, strict: false })).transcripts[0];
+  assert.equal(userPlaced.association.tier, 3);
+  assert.equal(evidenceKey(userPlaced, "memory"), evidence.key, "signatures do not depend on association tier");
+  for (const scope of [null, userScope]) {
+    db.prepare("UPDATE sessions SET cwd = ?").run(repoRoot);
+    update(repoRoot);
+    const ordinary = (await scan({ scope })).transcripts[0];
+    assert.equal(ordinary.association.tier, 1);
+    const cached = { status: "ok", key: evidenceKey(ordinary, "memory") };
+    assert.deepEqual((await attributeTranscripts([ordinary], repo, config.state)).get(ordinary.identity), [
+      "src/app.ts",
+    ]);
+    assert.equal(isEvidenceFresh(cached, (await scan({ scope })).transcripts[0], "memory"), true);
+    update(repoRoot, "src/new.ts");
+    const revised = (await scan({ scope })).transcripts[0];
+    assert.equal(revised.mtimeMs, ordinary.mtimeMs);
+    assert.equal(isEvidenceFresh(cached, revised, "memory"), false);
+    assert.deepEqual((await attributeTranscripts([revised], repo, config.state)).get(revised.identity), ["src/new.ts"]);
+  }
+  db.prepare("UPDATE sessions SET cwd = ?").run(scratch);
+  update(repoRoot);
 
   const prior = config.state.readScanCache().work;
   const warnings = [];
@@ -377,6 +407,63 @@ test("SQLite content changes invalidate work paths without changing timestamps",
   assert.ok(warnings.some((line) => line.includes("hermes") && line.includes("tool_calls")));
   db.exec("ALTER TABLE messages RENAME COLUMN broken TO tool_calls");
   assert.equal((await scan()).transcripts[0]?.association.tier, 2.5);
+
+  t.mock.method(ADAPTERS.hermes, "discover", async (options) =>
+    (await original.discover(options)).map((row) => ({ ...row, contentSignature: "adapter-owned" })),
+  );
+  assert.equal((await scan()).transcripts[0].contentSignature, "adapter-owned");
+  assert.equal((await scan({ scope: userScope, strict: false })).transcripts[0].contentSignature, "adapter-owned");
+  update(otherRoot);
+  assert.equal((await scan()).transcripts.length, 0, "work paths still use the freshly read events' hash");
+});
+
+test("Cursor CLI SQLite edits invalidate evidence and work-cache misses despite unchanged file headers", async (t) => {
+  const { base, repo, repoRoot, scratch } = layout();
+  const dir = path.join(base, "cursor-session");
+  fs.mkdirSync(dir);
+  const meta = path.join(dir, "meta.json");
+  fs.writeFileSync(meta, JSON.stringify({ cwd: repoRoot }));
+  const db = new DatabaseSync(path.join(dir, "store.db"));
+  t.after(() => db.close());
+  db.exec("CREATE TABLE blobs (id TEXT PRIMARY KEY, data BLOB)");
+  const update = (text) =>
+    db
+      .prepare("INSERT OR REPLACE INTO blobs VALUES ('message', ?)")
+      .run(JSON.stringify({ role: "user", content: text }));
+  const original = ADAPTERS.cursor;
+  ADAPTERS.cursor = {
+    ...original,
+    enumerate: () => {
+      const stat = fs.statSync(meta);
+      return [{ key: dir, path: dir, mtimeMs: stat.mtimeMs, bytes: stat.size }];
+    },
+  };
+  t.after(() => {
+    ADAPTERS.cursor = original;
+  });
+  const config = loadConfig(repoRoot, { discovery: { harnesses: ["cursor"], since: "all" } });
+  config.state = new State(repoRoot);
+  const scan = () => discoverTranscripts({ repo, config, strict: true });
+  update("Original request");
+  const first = (await scan()).transcripts[0];
+  assert.equal(first.association.tier, 1);
+  const evidence = { status: "ok", key: evidenceKey(first, "memory") };
+  assert.equal(isEvidenceFresh(evidence, (await scan()).transcripts[0], "memory"), true);
+  update("Revised request");
+  const revised = (await scan()).transcripts[0];
+  assert.equal(revised.mtimeMs, first.mtimeMs);
+  assert.equal(revised.bytes, first.bytes);
+  assert.equal(isEvidenceFresh(evidence, revised, "memory"), false);
+
+  fs.writeFileSync(meta, JSON.stringify({ cwd: scratch }));
+  assert.equal((await scan()).transcripts.length, 0);
+  const prior = config.state.readScanCache().work;
+  update("Another request");
+  assert.equal((await scan()).transcripts.length, 0);
+  const refreshed = config.state.readScanCache().work;
+  assert.notEqual(refreshed[first.identity].content, prior[first.identity].content);
+  await scan();
+  assert.deepEqual(config.state.readScanCache().work, refreshed);
 });
 
 test("discovery counts symlink aliases once and never treats shell patch text as work", async (t) => {

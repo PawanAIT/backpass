@@ -273,7 +273,9 @@ Collection is incremental.
 Codex alone can hold 10,000+ rollouts, so file-store headers are cached in `.backpass/scan-cache.json` by path, mtime and size; new or changed files are re-read.
 Tier-2.5 work paths are cached in the same file by transcript identity, a work-cache signature and resolver version.
 For file-backed candidates, the work-cache signature uses the transcript's content signature (falling back to mtime and size), so unchanged candidates reuse their cached paths without another transcript read.
-SQLite candidates are read once per scan, including cache hits; a hash of their cwd and events keys only the work-path cache, while each transcript retains its adapter-provided content signature for evidence and nested attribution.
+Local SQLite sessions are read once per scan, including cache hits, and a hash of their cwd and events keys the work-path cache.
+When the adapter supplies no content signature, discovery also uses this hash for evidence and nested attribution on every association tier, so changed calls invalidate those caches even if timestamps stay fixed.
+This replaces timestamp-only keys for existing local SQLite evidence once; subsequent scans reuse evidence for unchanged content.
 Re-scans check the paths' checkout ownership against the live filesystem again.
 A harness whose store is missing or has drifted into an unrecognised shape produces a
 warning and is skipped; the run continues. backpass's own loss and gradient-descent calls land
