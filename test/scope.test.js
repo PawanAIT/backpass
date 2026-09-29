@@ -142,13 +142,26 @@ test(
     const previous = process.cwd();
     process.chdir(initRepo("elsewhere"));
     try {
-      const kept = associateUser({ cwd: "C:\\work\\demo" });
+      const kept = associateUser({ cwd: "C:\\work\\demo" }, { wsl: null });
       assert.equal(kept.tier, 3);
       assert.equal(kept.project, "C:\\work\\demo", "never resolved under the process cwd");
-      assert.equal(associateUser({ cwd: "C:\\work\\demo" }, { strict: true }), null);
+      assert.equal(associateUser({ cwd: "C:\\work\\demo" }, { strict: true, wsl: null }), null);
     } finally {
       process.chdir(previous);
     }
+  },
+);
+
+test(
+  "under WSL a Windows path to this distro keys the same user-scope project as its POSIX spelling",
+  { skip: process.platform === "win32" && "Windows spells this path natively" },
+  () => {
+    const root = initRepo("wsl");
+    const wsl = { distro: "Ubuntu", drives: new Map() };
+    const result = associateUser({ cwd: `\\\\wsl.localhost\\Ubuntu${root.replaceAll("/", "\\")}` }, { wsl });
+    assert.equal(result.tier, 1);
+    assert.equal(result.projectRoot, root);
+    assert.equal(result.project, associateUser({ cwd: root }).project);
   },
 );
 

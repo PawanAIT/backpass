@@ -50,7 +50,7 @@ import { transcriptIdentity } from "./transcript.js";
  * single-primary run it always was.
  */
 
-export const ATTRIBUTION_VERSION = 4;
+export const ATTRIBUTION_VERSION = 5;
 
 /** Tool-input fields that name a file or directory a session worked in. */
 const PATH_FIELDS = ["file_path", "filePath", "notebook_path", "path"];
@@ -275,17 +275,22 @@ export function toolPaths(events) {
  * to its cwd when no tool paths are recorded. Paths outside known checkouts are dropped,
  * and so is a path this machine cannot spell (`localPath`): a Windows path read on a
  * POSIX host is never resolved against the cwd, and neither is a relative path whose
- * call ran in such a workdir.
+ * call ran in such a workdir. Under WSL a mounted Windows path is read where WSL puts it.
+ *
+ * @param {{ cwd?: string | null }} transcript
+ * @param {object[]} events
+ * @param {string[]} roots
+ * @param {{ wsl?: import("./discovery/paths.js").WslEnvironment | null }} [options]
  */
-export function workedPaths(transcript, events, roots) {
-  const recordedCwd = localPath(transcript.cwd);
+export function workedPaths(transcript, events, roots, { wsl } = {}) {
+  const recordedCwd = localPath(transcript.cwd, { wsl });
   const cwd = recordedCwd && path.isAbsolute(recordedCwd) ? recordedCwd : null;
   const out = new Set();
   const named = toolPaths(events);
   if (!named.length && cwd) named.push({ raw: cwd, workdir: null });
   for (const entry of named) {
-    const raw = localPath(entry.raw);
-    const workdir = entry.workdir === null ? null : localPath(entry.workdir);
+    const raw = localPath(entry.raw, { wsl });
+    const workdir = entry.workdir === null ? null : localPath(entry.workdir, { wsl });
     if (raw === null || (entry.workdir !== null && workdir === null)) continue;
     if (raw.startsWith("~") || workdir?.startsWith("~")) continue;
     const base = workdir ? (path.isAbsolute(workdir) ? workdir : cwd ? path.resolve(cwd, workdir) : null) : cwd;

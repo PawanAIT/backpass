@@ -65,11 +65,14 @@ function realpathOrResolve(p) {
  *
  * A cwd this machine cannot spell (`localPath`) is keyed by its recorded string, never
  * resolved against the process cwd.
+ *
+ * @param {{ cwd?: string | null, remotes?: string[] } | null} descriptor
+ * @param {{ strict?: boolean, wsl?: import("./discovery/paths.js").WslEnvironment | null }} [options]
  */
-export function associateUser(descriptor, { strict = false } = {}) {
+export function associateUser(descriptor, { strict = false, wsl } = {}) {
   const cwd = descriptor?.cwd;
   if (!cwd) return null;
-  const local = localPath(cwd);
+  const local = localPath(cwd, { wsl });
 
   const liveRoot = local ? gitToplevel(local) : null;
   if (liveRoot) {

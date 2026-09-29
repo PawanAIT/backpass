@@ -275,8 +275,29 @@ test(
       { kind: "tool", input: "*** Begin Patch\n*** Update File: D:/work/apps/api/y.ts\n*** End Patch" },
       { kind: "tool", input: { path: "apps/api/handler.ts" } },
     ];
-    assert.deepEqual(workedPaths({ cwd: repo.root }, events, roots), ["apps/api/handler.ts"]);
-    assert.deepEqual(workedPaths({ cwd: "C:\\work" }, [], roots), [], "a Windows cwd places nothing either");
+    const notWsl = { wsl: null };
+    assert.deepEqual(workedPaths({ cwd: repo.root }, events, roots, notWsl), ["apps/api/handler.ts"]);
+    assert.deepEqual(workedPaths({ cwd: "C:\\work" }, [], roots, notWsl), [], "a Windows cwd places nothing either");
+  },
+);
+
+test(
+  "under WSL a Windows session's tool paths into this distro place its work",
+  { skip: process.platform === "win32" && "Windows spells these paths natively" },
+  () => {
+    const repo = makeRepo({ "apps/api/AGENTS.md": "# API\n" });
+    const roots = checkoutRoots(repo);
+    const wsl = { distro: "Ubuntu", drives: new Map([["c", "/mnt/c"]]) };
+    const unc = `\\\\wsl.localhost\\Ubuntu${repo.root.replaceAll("/", "\\")}`;
+    const events = [
+      { kind: "tool", input: { path: `${unc}\\apps\\api\\handler.ts` } },
+      { kind: "tool", input: { path: "routes/index.ts", workdir: `${unc}\\apps\\api` } },
+      { kind: "tool", input: { filePath: "C:\\Users\\me\\notes.md" } },
+    ];
+    assert.deepEqual(workedPaths({ cwd: "C:\\Users\\me\\setup" }, events, roots, { wsl }), [
+      "apps/api/handler.ts",
+      "apps/api/routes/index.ts",
+    ]);
   },
 );
 

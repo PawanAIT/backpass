@@ -19,7 +19,8 @@ import { isWindowsPath, localPath } from "./paths.js";
  *
  * The path tiers (1, 1.5, 3) only ever see a cwd this machine can spell (`./paths.js`):
  * a Windows path read on a POSIX host is no path here, so it matches nothing rather than
- * resolving under the process cwd. A recorded remote (tier 2) still associates it.
+ * resolving under the process cwd, unless WSL mounts it here (`C:\work` is `/mnt/c/work`).
+ * A recorded remote (tier 2) still associates it.
  *
  * Returns null when the transcript belongs to some other repo.
  */
@@ -68,7 +69,7 @@ export function associate(descriptor, repo, options = {}) {
   if (options.facts) return associateRemote(descriptor, repo, options);
   const { cwd, remotes = [], gitRoot = null } = descriptor;
   const globs = options.worktreeGlobs || [];
-  const candidates = [cwd, gitRoot].map((recorded) => localPath(recorded)).filter(Boolean);
+  const candidates = [cwd, gitRoot].map((recorded) => localPath(recorded, { wsl: options.wsl })).filter(Boolean);
 
   // Tier 1 - live path under a known worktree of this clone.
   for (const candidate of candidates) {

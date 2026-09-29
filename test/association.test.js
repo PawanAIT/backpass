@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 
 import { associate, globToRegExp, passesStrict } from "../src/discovery/association.js";
-import { isWindowsPath, localPath } from "../src/discovery/paths.js";
+import { isWindowsPath, localPath, parseDriveMounts, wslEnvironment } from "../src/discovery/paths.js";
 import { normalizeRemote } from "../src/repo.js";
 
 /** A repo identity backed by one real directory, so tier-1/tier-3 liveness is genuine. */
@@ -115,23 +115,48 @@ const WINDOWS_CWDS = [
 ];
 
 test(
-  "a Windows cwd matches no path tier on POSIX, even when backpass runs inside the clone",
+  "a Windows cwd matches no path tier on a POSIX host that is not WSL, even from inside the clone",
   { skip: process.platform === "win32" && "Windows spells these paths natively" },
   () => {
     const { repo, live } = makeRepo();
+    const notWsl = { wsl: null };
     fromInside(live, () => {
       for (const cwd of WINDOWS_CWDS) {
-        assert.equal(associate({ cwd }, repo), null, `${cwd} is no path on this machine`);
-        assert.equal(associate({ cwd, gitRoot: cwd }, repo), null, `${cwd} as a recorded root matches nothing either`);
+        assert.equal(associate({ cwd }, repo, notWsl), null, `${cwd} is no path on this machine`);
         assert.equal(
-          associate({ cwd, remotes: [] }, repo, { worktreeGlobs: ["**"] }),
+          associate({ cwd, gitRoot: cwd }, repo, notWsl),
+          null,
+          `${cwd} as a recorded root matches nothing either`,
+        );
+        assert.equal(
+          associate({ cwd, remotes: [] }, repo, { ...notWsl, worktreeGlobs: ["**"] }),
           null,
           `${cwd} never reaches the best-effort tier`,
         );
       }
-      const remote = associate({ cwd: "C:\\work\\demo", remotes: ["git@github.com:acme/demo.git"] }, repo);
+      const remote = associate({ cwd: "C:\\work\\demo", remotes: ["git@github.com:acme/demo.git"] }, repo, notWsl);
       assert.equal(remote.tier, 2, "a recorded remote still associates the session");
     });
+  },
+);
+
+test(
+  "under WSL a Windows path to this distro is the same place as its POSIX spelling",
+  { skip: process.platform === "win32" && "Windows spells these paths natively" },
+  () => {
+    const { repo, live } = makeRepo();
+    const wsl = { distro: "Ubuntu", drives: new Map() };
+    const backslashed = live.replaceAll("/", "\\");
+    for (const cwd of [
+      `\\\\wsl.localhost\\Ubuntu${backslashed}`,
+      `//wsl.localhost/Ubuntu${live}`,
+      `\\\\wsl$\\ubuntu${live}`,
+    ]) {
+      assert.equal(associate({ cwd }, repo, { wsl })?.tier, 1, cwd);
+      assert.equal(associate({ cwd: `${cwd}/src` }, repo, { wsl })?.confidence, "nested", cwd);
+    }
+    assert.equal(associate({ cwd: `\\\\wsl.localhost\\Debian${backslashed}` }, repo, { wsl }), null, "another distro");
+    assert.equal(associate({ cwd: `\\\\server\\share${backslashed}` }, repo, { wsl }), null, "a network share");
   },
 );
 
@@ -149,16 +174,61 @@ test("a Windows cwd from another machine reaches no tier over there either", () 
 test("localPath refuses a Windows path only where it names no place", () => {
   for (const cwd of WINDOWS_CWDS) {
     assert.equal(isWindowsPath(cwd), true, cwd);
-    assert.equal(localPath(cwd, { platform: "linux" }), null, cwd);
+    assert.equal(localPath(cwd, { platform: "linux", wsl: null }), null, cwd);
     assert.equal(localPath(cwd, { platform: "darwin" }), null, cwd);
     assert.equal(localPath(cwd, { platform: "win32" }), cwd, cwd);
   }
   for (const posix of ["/home/me/demo", "relative/demo", "/", "a:b/c"]) {
     assert.equal(isWindowsPath(posix), false, posix);
-    assert.equal(localPath(posix, { platform: "linux" }), posix, posix);
+    assert.equal(localPath(posix, { platform: "linux", wsl: null }), posix, posix);
   }
   assert.equal(localPath("", { platform: "linux" }), null);
   assert.equal(localPath(null, { platform: "linux" }), null);
+});
+
+test("under WSL a drive path is read where /proc/mounts mounts that drive", () => {
+  const drives = parseDriveMounts(
+    [
+      "drivers /usr/lib/wsl/drivers 9p ro,nosuid,nodev,noatime,aname=drivers;fmask=222;dmask=222 0 0",
+      "C:\\134 /mnt/c 9p rw,noatime,aname=drvfs;path=C:\\;uid=1000;gid=1000;symlinkroot=/mnt/ 0 0",
+      "D:\\134 /win/d\\040drive 9p rw,noatime,aname=drvfs;path=D:\\;uid=1000 0 0",
+      "E: /mnt/e drvfs rw,noatime,uid=1000,gid=1000 0 0",
+      "/dev/sdc / ext4 rw,relatime 0 0",
+    ].join("\n"),
+  );
+  assert.deepEqual(
+    [...drives],
+    [
+      ["c", "/mnt/c"],
+      ["d", "/win/d drive"],
+      ["e", "/mnt/e"],
+    ],
+  );
+  const wsl = { distro: "Ubuntu", drives };
+  const read = (recorded) => localPath(recorded, { platform: "linux", wsl });
+  assert.equal(read("C:\\Users\\me\\repo"), "/mnt/c/Users/me/repo");
+  assert.equal(read("C:/Users/me/repo/"), "/mnt/c/Users/me/repo");
+  assert.equal(read("c:\\"), "/mnt/c");
+  assert.equal(read("D:\\work\\x.ts"), "/win/d drive/work/x.ts");
+  assert.equal(read("E:/a/../b"), "/mnt/e/b");
+  assert.equal(read("F:\\unmounted"), null, "a drive WSL has not mounted names nothing here");
+  assert.equal(read("\\\\wsl.localhost\\Ubuntu\\home\\me\\repo"), "/home/me/repo");
+  assert.equal(read("//wsl.localhost/Ubuntu/home/me/repo"), "/home/me/repo");
+  assert.equal(read("\\\\wsl$\\UBUNTU\\home\\me"), "/home/me", "distro names are case-insensitive");
+  assert.equal(read("\\\\wsl.localhost\\Ubuntu"), "/");
+  assert.equal(read("\\\\wsl.localhost\\Debian\\home\\me"), null, "another distro");
+  assert.equal(read("\\\\fileserver\\share\\repo"), null, "a network share");
+  assert.equal(
+    localPath("\\\\wsl.localhost\\Ubuntu\\home\\me", { platform: "linux", wsl: { distro: null, drives } }),
+    null,
+    "without WSL_DISTRO_NAME no distro path can be placed",
+  );
+});
+
+test("wslEnvironment is only WSL on Linux, where WSL_DISTRO_NAME names the distro", () => {
+  assert.equal(wslEnvironment({ platform: "darwin", env: { WSL_DISTRO_NAME: "Ubuntu" } }), null);
+  assert.equal(wslEnvironment({ platform: "win32", env: { WSL_DISTRO_NAME: "Ubuntu" } }), null);
+  assert.equal(wslEnvironment({ platform: "linux", env: { WSL_DISTRO_NAME: "Ubuntu" } })?.distro, "Ubuntu");
 });
 
 test("--strict keeps only the deterministic tiers", () => {
