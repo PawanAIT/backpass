@@ -395,7 +395,9 @@ test(
           assert.deepEqual(workedPaths({ cwd }, [{ kind: "tool", input }], [root], { wsl }), ["apps/api/x.ts"]);
         }
         const input = { path: `${rooted}\\x.ts`, [field]: base };
-        assert.deepEqual(workedPaths({ cwd: repo.root }, [{ kind: "tool", input }], [root], { wsl }), ["apps/api/x.ts"]);
+        assert.deepEqual(workedPaths({ cwd: repo.root }, [{ kind: "tool", input }], [root], { wsl }), [
+          "apps/api/x.ts",
+        ]);
       }
     }
     for (const raw of ["..\\..\\..\\work\\repo\\apps\\api\\x.ts", "~/apps/api/x.ts"]) {
