@@ -19,9 +19,10 @@ import { openReadOnly, safeJsonParse } from "./sqlite.js";
  *
  * acpx drives opencode, so backpass's own analysis and synthesis calls land in this
  * store under the repo's cwd. There is no transcript file for `../self.js` to read, so
- * the listing query reads each session's first user text part and the row is marked
- * `self` when it opens with the sentinel every backpass prompt starts with. Ancestors
- * are checked without the listing cutoff so delegated work cannot re-enter the corpus
+ * the listing query reads the first text part of each session's first user message and
+ * the row is marked `self` when it opens with the sentinel every backpass prompt starts
+ * with. Self ancestry is propagated once per discovery, without the listing cutoff,
+ * so delegated work cannot re-enter the corpus
  * when its backpass-originated parent ages out of the discovery window. A session
  * with no messages at all, such as the one each agent probe creates, is not listed.
  */
@@ -49,14 +50,17 @@ function hasTables(db, ...names) {
   return names.every((name) => check.get(name) !== undefined);
 }
 
-/** The earliest user text part, skipping malformed JSON and non-text parts. */
+/** Pick the first user message before its text, so attachment-only openings stay genuine. */
 const FIRST_USER_PART = `(SELECT pt.data
-     FROM message m
-     JOIN part pt ON pt.message_id = m.id
-    WHERE m.session_id = s.id
-      AND CASE WHEN json_valid(m.data) THEN json_extract(m.data, '$.role') END = 'user'
+     FROM part pt
+    WHERE pt.message_id = (
+      SELECT m.id FROM message m
+       WHERE m.session_id = s.id
+         AND CASE WHEN json_valid(m.data) THEN json_extract(m.data, '$.role') END = 'user'
+       ORDER BY m.time_created, m.id
+       LIMIT 1)
       AND CASE WHEN json_valid(pt.data) THEN json_extract(pt.data, '$.type') END = 'text'
-    ORDER BY m.time_created, m.id, pt.id
+    ORDER BY pt.id
     LIMIT 1)`;
 
 export async function discover({ cutoffMs }) {
@@ -67,56 +71,53 @@ export async function discover({ cutoffMs }) {
     const parentSelect = tableHasColumn(db, "session", "parent_id") ? ", s.parent_id AS parent_id" : "";
     const firstUserSelect = hasTables(db, "message", "part") ? `, ${FIRST_USER_PART} AS first_user_part` : "";
     // Unused probes have no messages; attachment conversations need not have user text.
-    const recordedFilter = hasTables(db, "message")
-      ? " AND EXISTS (SELECT 1 FROM message m WHERE m.session_id = s.id)"
-      : "";
+    const recordedSelect = hasTables(db, "message")
+      ? "EXISTS (SELECT 1 FROM message m WHERE m.session_id = s.id)"
+      : "1";
     const rows = db
       .prepare(
         `SELECT s.id AS id, s.directory AS directory, s.title AS title,
                 s.time_created AS time_created, s.time_updated AS time_updated,
-                p.worktree AS worktree${parentSelect}${firstUserSelect}
+                p.worktree AS worktree, ${recordedSelect} AS recorded${parentSelect}${firstUserSelect}
            FROM session s
-           LEFT JOIN project p ON p.id = s.project_id
-          WHERE (? IS NULL OR s.time_updated >= ?)${recordedFilter}`,
+           LEFT JOIN project p ON p.id = s.project_id`,
       )
-      .all(cutoffMs ?? null, cutoffMs ?? 0);
+      .all();
 
-    const ancestorParts =
-      parentSelect && firstUserSelect
-        ? db.prepare(`WITH RECURSIVE ancestors(id) AS (
-            VALUES (?)
-            UNION
-            SELECT s.parent_id FROM session s JOIN ancestors a ON s.id = a.id
-             WHERE s.parent_id IS NOT NULL
-          )
-          SELECT ${FIRST_USER_PART} AS first_user_part
-            FROM session s JOIN ancestors a ON s.id = a.id`)
-        : null;
+    const children = new Map();
+    const selfIds = new Set();
+    for (const row of rows) {
+      if (opensWithSentinel(safeJsonParse(row.first_user_part)?.text)) selfIds.add(row.id);
+      if (row.parent_id) {
+        if (!children.has(row.parent_id)) children.set(row.parent_id, []);
+        children.get(row.parent_id).push(row.id);
+      }
+    }
+    // Set iteration visits new additions too; each descendant is propagated once,
+    // including empty intermediates, and cycles terminate without recursive queries.
+    for (const id of selfIds) {
+      for (const child of children.get(id) || []) selfIds.add(child);
+    }
 
-    return rows.map((row) => ({
-      key: `opencode:${row.id}`,
-      id: row.id,
-      path: dbPath(),
-      cwd: row.directory,
-      gitRoot: row.worktree || null,
-      gitBranch: null,
-      remotes: [],
-      title: row.title || null,
-      startedAt: Number(row.time_created) || null,
-      mtimeMs: Number(row.time_updated) || Number(row.time_created) || 0,
-      bytes: 0,
-      model: null,
-      extra: { sessionId: row.id },
-      interactionSignals: row.parent_id ? interactionSignals({ parentId: row.parent_id }) : emptyInteractionSignals(),
-      self:
-        opensWithSentinel(safeJsonParse(row.first_user_part)?.text) ||
-        Boolean(
-          row.parent_id &&
-          ancestorParts
-            ?.all(row.parent_id)
-            .some((ancestor) => opensWithSentinel(safeJsonParse(ancestor.first_user_part)?.text)),
-        ),
-    }));
+    return rows
+      .filter((row) => row.recorded && (cutoffMs == null || row.time_updated >= cutoffMs))
+      .map((row) => ({
+        key: `opencode:${row.id}`,
+        id: row.id,
+        path: dbPath(),
+        cwd: row.directory,
+        gitRoot: row.worktree || null,
+        gitBranch: null,
+        remotes: [],
+        title: row.title || null,
+        startedAt: Number(row.time_created) || null,
+        mtimeMs: Number(row.time_updated) || Number(row.time_created) || 0,
+        bytes: 0,
+        model: null,
+        extra: { sessionId: row.id },
+        interactionSignals: row.parent_id ? interactionSignals({ parentId: row.parent_id }) : emptyInteractionSignals(),
+        self: selfIds.has(row.id),
+      }));
   } finally {
     db.close();
   }

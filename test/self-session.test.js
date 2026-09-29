@@ -259,13 +259,16 @@ test("the exclusion survives the scan cache (a cached descriptor is still checke
   assert.equal(second.perHarness.pi.self, 1);
 });
 
-test("OpenCode attachment-only conversations survive CLI scans and shipped probes", async (t) => {
+test("OpenCode attachment openings followed by prompt quotes survive CLI scans and shipped probes", async (t) => {
   const { buildProbeProgram } = await import("../src/discovery/remote/bundle.js");
   const db = new DatabaseSync(path.join(fakeHome, ".local", "share", "opencode", "opencode.db"));
   const id = "ses_opencode_attachment";
   const reply = "The screenshot shows a missing release tag. Create the tag before publishing.";
   try {
-    writeOpencodeSessions(db, [{ id, firstUserText: "placeholder" }]);
+    writeOpencodeSessions(db, [
+      { id, firstUserText: "placeholder" },
+      { id: `${id}_child`, parentId: id, firstUserText: "Inspect the release" },
+    ]);
     const update = db.prepare("UPDATE part SET data = ? WHERE id = ?");
     update.run(
       JSON.stringify({
@@ -277,6 +280,22 @@ test("OpenCode attachment-only conversations survive CLI scans and shipped probe
       `prt_${id}_0_0`,
     );
     update.run(JSON.stringify({ type: "text", text: reply }), `prt_${id}_1_1`);
+    // A later user turn quotes a backpass prompt; it is not the conversation's opening.
+    const quotedPrompt = `${synthesisPrompt}\nWhy was this prompt sent?`;
+    const at = Date.parse("2026-08-20T10:00:02.000Z");
+    db.prepare("INSERT INTO message (id, session_id, time_created, data) VALUES (?, ?, ?, ?)").run(
+      `msg_${id}_2`,
+      id,
+      at,
+      JSON.stringify({ role: "user" }),
+    );
+    db.prepare("INSERT INTO part (id, message_id, session_id, time_created, data) VALUES (?, ?, ?, ?, ?)").run(
+      `prt_${id}_2_0`,
+      `msg_${id}_2`,
+      id,
+      at,
+      JSON.stringify({ type: "text", text: quotedPrompt }),
+    );
     const initialized = spawnSync("git", ["init", "-q", realRoot], { encoding: "utf8" });
     assert.equal(initialized.status, 0, initialized.stderr);
 
@@ -289,8 +308,12 @@ test("OpenCode attachment-only conversations survive CLI scans and shipped probe
         );
         assert.equal(result.status, 0, result.stderr);
         const output = JSON.parse(result.stdout);
-        assert.deepEqual(output.transcripts.map((entry) => entry.nativeId).sort(), [id, "ses_opencode_real"]);
-        assert.equal(output.perHarness.opencode.scanned, 3);
+        assert.deepEqual(output.transcripts.map((entry) => entry.nativeId).sort(), [
+          id,
+          `${id}_child`,
+          "ses_opencode_real",
+        ]);
+        assert.equal(output.perHarness.opencode.scanned, 4);
         assert.equal(output.perHarness.opencode.self, 1);
       }
     });
@@ -304,17 +327,22 @@ test("OpenCode attachment-only conversations survive CLI scans and shipped probe
       });
       assert.equal(result.status, 0, result.stderr);
       const output = JSON.parse(result.stdout);
-      assert.deepEqual(output.transcripts.map((entry) => entry.id).sort(), [id, "ses_opencode_real"]);
-      assert.equal(output.harnesses.opencode.scanned, 3);
+      assert.deepEqual(output.transcripts.map((entry) => entry.id).sort(), [id, `${id}_child`, "ses_opencode_real"]);
+      assert.equal(output.harnesses.opencode.scanned, 4);
       assert.equal(output.harnesses.opencode.self, 1);
     });
 
     const { read } = await import("../src/discovery/adapters/opencode.js");
-    assert.deepEqual((await read({ id })).events, [{ kind: "message", role: "assistant", text: reply }]);
+    assert.deepEqual((await read({ id })).events, [
+      { kind: "message", role: "assistant", text: reply },
+      { kind: "message", role: "user", text: quotedPrompt },
+    ]);
   } finally {
-    db.prepare("DELETE FROM part WHERE session_id = ?").run(id);
-    db.prepare("DELETE FROM message WHERE session_id = ?").run(id);
-    db.prepare("DELETE FROM session WHERE id = ?").run(id);
+    for (const sessionId of [id, `${id}_child`]) {
+      db.prepare("DELETE FROM part WHERE session_id = ?").run(sessionId);
+      db.prepare("DELETE FROM message WHERE session_id = ?").run(sessionId);
+      db.prepare("DELETE FROM session WHERE id = ?").run(sessionId);
+    }
     db.close();
   }
 });
@@ -333,6 +361,14 @@ test("malformed OpenCode rows do not suppress valid sessions locally or remotely
           // Recorded but unreadable messages are not unused probes. Remote discovery
           // lists them; local association still excludes the unrelated repository.
           const remoteIds = sessionId === "ses_other" ? ["ses_opencode_real", "ses_other"] : ["ses_opencode_real"];
+          const localIds = ["ses_opencode_real"];
+          // A valid first user message with unreadable content cannot be replaced by
+          // a later sentinel-bearing message when deciding whether the session is self.
+          const selfCount = column === "part" && sessionId === "ses_opencode_self" ? 0 : 1;
+          if (!selfCount) {
+            remoteIds.push("ses_opencode_self");
+            localIds.push("ses_opencode_self");
+          }
           db.prepare("INSERT INTO message (id, session_id, time_created, data) VALUES (?, ?, ?, ?)").run(
             "msg_corrupt",
             sessionId,
@@ -351,18 +387,15 @@ test("malformed OpenCode rows do not suppress valid sessions locally or remotely
             for (let scan = 0; scan < 2; scan++) {
               const local = await discoverTranscripts({ repo, config, harnesses: ["opencode"] });
               assert.equal(local.perHarness.opencode.error, null);
-              assert.deepEqual(
-                local.transcripts.map((entry) => entry.nativeId),
-                ["ses_opencode_real"],
-              );
-              assert.equal(local.perHarness.opencode.self, 1);
-              assert.equal(local.perHarness.opencode.scanned, remoteIds.length + 1);
+              assert.deepEqual(local.transcripts.map((entry) => entry.nativeId).sort(), localIds);
+              assert.equal(local.perHarness.opencode.self, selfCount);
+              assert.equal(local.perHarness.opencode.scanned, remoteIds.length + selfCount);
             }
             const remote = await discover({ harnesses: ["opencode"], cutoffMs: at });
             assert.equal(remote.harnesses.opencode.error, null);
             assert.deepEqual(remote.transcripts.map((entry) => entry.id).sort(), remoteIds);
-            assert.equal(remote.harnesses.opencode.self, 1);
-            assert.equal(remote.harnesses.opencode.scanned, remoteIds.length + 1);
+            assert.equal(remote.harnesses.opencode.self, selfCount);
+            assert.equal(remote.harnesses.opencode.scanned, remoteIds.length + selfCount);
           } finally {
             db.prepare("DELETE FROM part WHERE id = ?").run("prt_corrupt");
             db.prepare("DELETE FROM message WHERE id = ?").run("msg_corrupt");
@@ -424,6 +457,52 @@ test("OpenCode self ancestry excludes descendants locally and remotely regardles
       db.prepare("DELETE FROM message WHERE session_id = ?").run(id);
       db.prepare("DELETE FROM session WHERE id = ?").run(id);
     }
+    db.close();
+  }
+});
+
+test("OpenCode discovery does not reread shared ancestors for each child", async (t) => {
+  const { discover } = await import("../src/discovery/adapters/opencode.js");
+  const db = new DatabaseSync(path.join(fakeHome, ".local", "share", "opencode", "opencode.db"));
+  const sessions = [
+    { id: "shared_real", parentId: "ses_opencode_real", firstUserText: "Explore the release" },
+    { id: "shared_self", parentId: "ses_opencode_self", firstUserText: "Explore the parser" },
+  ];
+  let reads = 0;
+  const prepare = DatabaseSync.prototype.prepare;
+  t.mock.method(DatabaseSync.prototype, "prepare", function (...args) {
+    const statement = prepare.apply(this, args);
+    const all = statement.all;
+    t.mock.method(statement, "all", function (...params) {
+      reads++;
+      return all.apply(this, params);
+    });
+    return statement;
+  });
+  try {
+    writeOpencodeSessions(db, sessions);
+    await discover({ cutoffMs: null });
+    const initialReads = reads;
+    const children = Array.from({ length: 32 }, (_, index) => ({
+      id: `shared_child_${index}`,
+      parentId: index % 2 ? "shared_self" : "shared_real",
+      firstUserText: "Inspect the tests",
+    }));
+    sessions.push(...children);
+    writeOpencodeSessions(db, children);
+    reads = 0;
+    const rows = await discover({ cutoffMs: null });
+    assert.equal(reads, initialReads, "adding siblings must not add ancestor database reads");
+    for (const child of children) {
+      assert.equal(rows.find((row) => row.id === child.id)?.self, child.parentId === "shared_self");
+    }
+  } finally {
+    for (const { id } of sessions) {
+      db.prepare("DELETE FROM part WHERE session_id = ?").run(id);
+      db.prepare("DELETE FROM message WHERE session_id = ?").run(id);
+      db.prepare("DELETE FROM session WHERE id = ?").run(id);
+    }
+    t.mock.restoreAll();
     db.close();
   }
 });
