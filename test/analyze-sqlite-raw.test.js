@@ -24,8 +24,8 @@ import { State } from "../src/state.js";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const CLI = path.join(ROOT, "bin", "backpass.js");
-/** Older than the 15-minute raw-file lease in src/analyze.js. */
-const RAW_LEASE_EXPIRED_MS = 16 * 60_000;
+/** Just beyond the 24-hour raw-file lease. */
+const RAW_LEASE_EXPIRED_MS = 24 * 60 * 60_000 + 60_000;
 
 const binDir = fs.mkdtempSync(path.join(os.tmpdir(), "backpass-sqlite-raw-bin-"));
 const fakePi = path.join(binDir, "pi");
@@ -292,7 +292,7 @@ test(
   },
 );
 
-test("analysis keeps live root and nested raw files and reclaims expired leases", () => {
+test("analysis tolerates hours of clock skew in root and nested leases and reclaims day-old leftovers", () => {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), "backpass-sqlite-raw-home-"));
   const dir = initRepo();
   const preload = path.join(binDir, "raw-leases.mjs");
@@ -306,12 +306,12 @@ if (process.argv[1] === ${JSON.stringify(CLI)}) {
   const files = ["raw", "nested/previous/raw"].flatMap((subdir) => {
     const rawDir = path.join(process.cwd(), ".backpass", subdir);
     fs.mkdirSync(rawDir, { recursive: true });
-    return [0, ${RAW_LEASE_EXPIRED_MS}].map((age) => {
+    return [0, -6 * 60 * 60_000, 6 * 60 * 60_000, 24 * 60 * 60_000 - 60_000, ${RAW_LEASE_EXPIRED_MS}].map((age) => {
       const file = path.join(rawDir, randomUUID() + ".jsonl");
       fs.writeFileSync(file, "analysis events\\n", { mode: 0o600 });
       const at = new Date(Date.now() - age);
       fs.utimesSync(file, at, at);
-      return { file, expired: age > 0 };
+      return { file, expired: age === ${RAW_LEASE_EXPIRED_MS} };
     });
   });
   fs.writeFileSync(${JSON.stringify(filesLog)}, JSON.stringify(files));
@@ -324,11 +324,70 @@ if (process.argv[1] === ${JSON.stringify(CLI)}) {
   assert.equal(result.status, 0, `${result.stdout}${result.stderr}`);
   assert.equal(JSON.parse(result.stdout).summary, null);
   const files = JSON.parse(fs.readFileSync(filesLog, "utf8"));
-  assert.equal(files.length, 4);
+  assert.equal(files.length, 10);
   for (const { file, expired } of files) {
     assert.equal(fs.existsSync(file), !expired, `${expired ? "kept expired" : "deleted live"} ${file}`);
   }
 });
+
+for (const cached of [false, true]) {
+  for (const subdir of ["nested", "raw", "nested/previous/raw"]) {
+    for (const fault of ["unreadable-stat", "unreadable-list", "vanished", "not-directory"]) {
+      test(`${cached ? "cached" : "empty"} analysis skips ${fault} ${subdir} with one warning`, () => {
+        const home = fs.mkdtempSync(path.join(os.tmpdir(), "backpass-sqlite-raw-home-"));
+        const dir = initRepo();
+        if (cached) {
+          writeStore(home, dir);
+          const initial = analyze(dir, home);
+          assert.equal(initial.status, 0, `${initial.stdout}${initial.stderr}`);
+        }
+        const badDir = path.join(dir, ".backpass", subdir);
+        fs.mkdirSync(badDir, { recursive: true });
+        if (fault === "not-directory") {
+          fs.rmdirSync(badDir);
+          fs.writeFileSync(badDir, "not a directory\n");
+        }
+        const healthyDir = path.join(dir, ".backpass", subdir === "nested" ? "raw" : "nested/healthy/raw");
+        fs.mkdirSync(healthyDir, { recursive: true });
+        const expiredFile = path.join(healthyDir, `${randomUUID()}.jsonl`);
+        fs.writeFileSync(expiredFile, "abandoned events\n");
+        const expired = new Date(Date.now() - RAW_LEASE_EXPIRED_MS);
+        fs.utimesSync(expiredFile, expired, expired);
+        const preload = path.join(binDir, "raw-directory-fault.mjs");
+        fs.writeFileSync(
+          preload,
+          `import fs from "node:fs";
+import path from "node:path";
+if (process.argv[1] === ${JSON.stringify(CLI)} && ${JSON.stringify(fault)} !== "not-directory") {
+  const method = ${JSON.stringify(fault === "unreadable-stat" ? "lstatSync" : "readdirSync")};
+  const original = fs[method];
+  fs[method] = function (file, ...args) {
+    if (path.resolve(String(file)) === ${JSON.stringify(badDir)}) {
+      const code = ${JSON.stringify(fault === "vanished" ? "ENOENT" : "EACCES")};
+      throw Object.assign(new Error(code + ": injected directory failure"), { code });
+    }
+    return original.call(this, file, ...args);
+  };
+}
+`,
+        );
+        const result = analyze(dir, home, {
+          NODE_OPTIONS: `${process.env.NODE_OPTIONS || ""} --import=${JSON.stringify(pathToFileURL(preload).href)}`,
+        });
+        assert.equal(result.status, 0, `${result.stdout}${result.stderr}`);
+        const { summary } = JSON.parse(result.stdout);
+        if (cached) assert.equal(summary.cached, 1);
+        else assert.equal(summary, null);
+        const warnings = result.stderr
+          .split("\n")
+          .filter((line) => line.includes("could not reclaim raw transcripts in"));
+        assert.equal(warnings.length, 1, result.stderr);
+        assert.ok(warnings[0].includes(badDir), result.stderr);
+        assert.equal(fs.existsSync(expiredFile), false, "healthy sibling cleanup still runs");
+      });
+    }
+  }
+}
 
 test("a running call renews its raw file's lease", async (t) => {
   t.mock.timers.enable({ apis: ["setInterval"] });

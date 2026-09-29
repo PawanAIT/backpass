@@ -34,11 +34,12 @@ const activeRawFiles = new Set();
 
 /**
  * A raw file is leased rather than owned by a PID: while its call runs, this process renews
- * the file's modification time every RAW_LEASE_RENEW_MS, so a file older than RAW_LEASE_MS
- * belongs to no running analysis, whatever process, PID namespace, or host wrote it.
+ * the file's modification time every minute. Reclaim only after 24 hours without renewal,
+ * allowing hours of clock skew between hosts sharing state while making SIGKILL leftovers
+ * eligible for cleanup after a day. PIDs cannot prove liveness across hosts or namespaces.
  */
 const RAW_LEASE_RENEW_MS = 60_000;
-const RAW_LEASE_MS = 15 * 60_000;
+const RAW_LEASE_MS = 24 * 60 * 60_000;
 const RAW_FILE_NAME = /^[0-9a-f-]{36}\.jsonl$/;
 let leaseTimer = null;
 
@@ -80,6 +81,19 @@ function releaseRawFile(file) {
   fs.rmSync(file, { force: true });
 }
 
+/** Housekeeping is best-effort: skip an inaccessible directory with one warning. */
+function rawCleanupEntries(dir) {
+  try {
+    const stat = fs.lstatSync(dir, { throwIfNoEntry: false });
+    if (!stat) return []; // Optional directory has not been created.
+    if (!stat.isDirectory()) throw new Error("not a directory");
+    return fs.readdirSync(dir, { withFileTypes: true });
+  } catch (err) {
+    warn(`could not reclaim raw transcripts in ${dir}: ${err.message}`);
+    return [];
+  }
+}
+
 /**
  * Removes raw files whose lease expired - what an uncatchable exit such as SIGKILL leaves
  * behind - from the state root and its nested state directories.
@@ -89,15 +103,12 @@ export function reclaimExpiredRawFiles(stateRoot) {
   const now = Date.now();
   const roots = [stateRoot];
   const nested = path.join(stateRoot, "nested");
-  if (fs.existsSync(nested) && fs.lstatSync(nested).isDirectory()) {
-    for (const entry of fs.readdirSync(nested, { withFileTypes: true })) {
-      if (entry.isDirectory()) roots.push(path.join(nested, entry.name));
-    }
+  for (const entry of rawCleanupEntries(nested)) {
+    if (entry.isDirectory()) roots.push(path.join(nested, entry.name));
   }
   for (const root of roots) {
     const dir = path.resolve(root, "raw");
-    if (!fs.existsSync(dir) || !fs.lstatSync(dir).isDirectory()) continue;
-    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+    for (const entry of rawCleanupEntries(dir)) {
       const file = path.join(dir, entry.name);
       if (!entry.isFile() || !RAW_FILE_NAME.test(entry.name)) continue;
       try {
