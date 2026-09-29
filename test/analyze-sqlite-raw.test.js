@@ -6,6 +6,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
 import { DatabaseSync } from "node:sqlite";
+import { randomUUID } from "node:crypto";
 
 /**
  * The raw-transcript escape hatch for a session in a SQLite store (opencode here).
@@ -139,10 +140,23 @@ function writeStore(home, repoDir, sessionDir = repoDir) {
   return path.join(store, "opencode.db");
 }
 
-function analyze(dir, home, env = {}) {
+function analyze(dir, home, env = {}, extraArgs = []) {
   return spawnSync(
     process.execPath,
-    [CLI, "analyze", "--harness", "opencode", "--since", "all", "--analysis-agent", "pi", "--jobs", "1", "--json"],
+    [
+      CLI,
+      "analyze",
+      "--harness",
+      "opencode",
+      "--since",
+      "all",
+      "--analysis-agent",
+      "pi",
+      "--jobs",
+      "1",
+      "--json",
+      ...extraArgs,
+    ],
     {
       cwd: dir,
       env: {
@@ -191,7 +205,7 @@ test("a SQLite session's escape hatch is a file of its own events, removed after
   assert.equal(fs.existsSync(path.dirname(seen.rawPath)), false);
 });
 
-for (const signal of ["SIGINT", "SIGTERM"]) {
+for (const signal of ["SIGINT", "SIGTERM", "SIGKILL"]) {
   for (const nested of [false, true]) {
     test(
       `a SQLite raw file is removed when ${nested ? "nested" : "root"} analysis receives ${signal}`,
@@ -208,21 +222,54 @@ for (const signal of ["SIGINT", "SIGTERM"]) {
             JSON.stringify({ nestedMemoryFiles: ["apps/api/AGENTS.md"] }),
           );
         }
-        writeStore(home, dir, sessionDir);
+        const database = writeStore(home, dir, sessionDir);
         fs.rmSync(seenLog, { force: true });
         const result = analyze(dir, home, {
           RAW_TEST_SIGNAL: signal,
           RAW_TEST_SIGNAL_MATCH: nested ? path.join(".backpass", "nested") : "",
         });
-        assert.equal(result.status, signal === "SIGINT" ? 130 : 143, `${result.stdout}${result.stderr}`);
+        if (signal === "SIGKILL") {
+          assert.equal(result.signal, "SIGKILL", `${result.stdout}${result.stderr}`);
+        } else {
+          assert.equal(result.status, signal === "SIGINT" ? 130 : 143, `${result.stdout}${result.stderr}`);
+        }
         const seen = JSON.parse(fs.readFileSync(seenLog, "utf8"));
         assert.equal(seen.exists, true);
         assert.equal(seen.rawPath.includes(path.join(".backpass", "nested")), nested);
+        if (signal === "SIGKILL") {
+          assert.equal(fs.existsSync(seen.rawPath), true, "SIGKILL cannot run exit cleanup");
+          const activeFile = path.join(path.dirname(seen.rawPath), `${process.pid}-${randomUUID()}.jsonl`);
+          fs.writeFileSync(activeFile, "live analysis events\n", { mode: 0o600 });
+          fs.utimesSync(activeFile, new Date(0), new Date(0));
+          fs.rmSync(database);
+          const recovered = analyze(dir, home);
+          assert.equal(recovered.status, 0, `${recovered.stdout}${recovered.stderr}`);
+          assert.equal(JSON.parse(recovered.stdout).summary, null, "cleanup must run even with no transcripts");
+          assert.equal(fs.readFileSync(activeFile, "utf8"), "live analysis events\n");
+        }
         assert.equal(fs.existsSync(seen.rawPath), false, "interrupting analysis must not retain raw events");
       },
     );
   }
 }
+
+test("cached analysis reclaims raw files left by a killed forced run", { skip: process.platform === "win32" }, () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "backpass-sqlite-raw-home-"));
+  const dir = initRepo();
+  writeStore(home, dir);
+  const initial = analyze(dir, home);
+  assert.equal(initial.status, 0, `${initial.stdout}${initial.stderr}`);
+  const killed = analyze(dir, home, { RAW_TEST_SIGNAL: "SIGKILL" }, ["--force"]);
+  assert.equal(killed.signal, "SIGKILL", `${killed.stdout}${killed.stderr}`);
+  const seen = JSON.parse(fs.readFileSync(seenLog, "utf8"));
+  assert.equal(fs.existsSync(seen.rawPath), true);
+  fs.rmSync(seenLog);
+  const cached = analyze(dir, home);
+  assert.equal(cached.status, 0, `${cached.stdout}${cached.stderr}`);
+  assert.equal(JSON.parse(cached.stdout).summary.cached, 1);
+  assert.equal(fs.existsSync(seenLog), false, "reclaiming an orphan must not require another model call");
+  assert.equal(fs.existsSync(seen.rawPath), false);
+});
 
 test("trivial SQLite sessions never materialize raw events", () => {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), "backpass-sqlite-raw-home-"));

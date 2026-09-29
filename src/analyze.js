@@ -165,7 +165,32 @@ function promptPathFor(state, transcript) {
  */
 function sessionRawPath(transcript, state) {
   if (transcript.host || !getAdapter(transcript.harness)?.sqliteBacked || !state?.root) return null;
-  return path.join(state.root, "raw", `${safeFileName(transcriptIdentity(transcript))}-${randomUUID()}.jsonl`);
+  return path.join(state.root, "raw", `${process.pid}-${randomUUID()}.jsonl`);
+}
+
+export function pruneSessionRawFiles(stateRoot) {
+  if (!stateRoot) return;
+  const roots = [stateRoot];
+  const nested = path.join(stateRoot, "nested");
+  if (fs.existsSync(nested) && fs.lstatSync(nested).isDirectory()) {
+    for (const entry of fs.readdirSync(nested, { withFileTypes: true })) {
+      if (entry.isDirectory()) roots.push(path.join(nested, entry.name));
+    }
+  }
+  for (const root of roots) {
+    const dir = path.join(root, "raw");
+    if (!fs.existsSync(dir) || !fs.lstatSync(dir).isDirectory()) continue;
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+      if (!entry.isFile()) continue;
+      const owner = /^([1-9]\d*)-[0-9a-f-]{36}\.jsonl$/.exec(entry.name);
+      if (!owner) continue;
+      try {
+        process.kill(Number(owner[1]), 0);
+      } catch (err) {
+        if (err.code === "ESRCH") fs.rmSync(path.join(dir, entry.name), { force: true });
+      }
+    }
+  }
 }
 
 async function analyzeOne({
@@ -307,6 +332,7 @@ export async function analyzeTranscripts({
   alsoLoaded = "",
 }) {
   const state = config.state;
+  pruneSessionRawFiles(state.root);
   const pending = [];
   const summary = {
     total: transcripts.length,

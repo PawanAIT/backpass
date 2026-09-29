@@ -290,7 +290,9 @@ dropped, secrets redacted. Typical reduction is **96-99%**.
 
 The distilled trace ends with the path to the raw transcript, so the analysis agent can open the original when - and only when - a specific claim needs it.
 For a session in a local SQLite store (opencode, hermes, Cursor CLI, Cursor IDE), the analysis call names a file of that session's normalized events instead of the store, which may contain other sessions or require queries against an undocumented schema.
-The file is written under `.backpass/raw/` with mode `0600`, only for non-trivial sessions, and removed when the call finishes or the process exits, including on SIGINT or SIGTERM.
+The file is written under `.backpass/raw/` with mode `0600`, only for non-trivial sessions, and removed when the call finishes or during catchable process exits, including SIGINT or SIGTERM.
+After an uncatchable exit such as SIGKILL, the next analysis run reclaims leftover files when their owning process no longer exists, including files in nested state directories.
+Files whose owner is still alive or cannot be checked are preserved, regardless of age.
 
 ### 3. Calculate loss - one cheap call per transcript
 
@@ -862,7 +864,7 @@ exclude (`.git/info/exclude`, written by `backpass init`) rather than the tracke
   rejections.json        edits you turned down, and the evidence behind them
   gap-ledger.json        gap sightings by gap and session, accumulated across runs
   hosts/                 transcripts fetched from SSH hosts (mode 0700), pruned after 30 days unused
-  raw/                   a SQLite-store session's events, only while its analysis call runs
+  raw/                   temporary SQLite-store session events; dead-owner files reclaimed on analysis
   apply/apply.html       the rendered review surface
 ```
 
