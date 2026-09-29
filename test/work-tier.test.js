@@ -316,7 +316,7 @@ test("discovery retries an actual file read failure and names it", async (t) => 
   assert.equal((await fixture.scan()).transcripts[0]?.association.tier, 2.5);
 });
 
-test("SQLite content changes invalidate work paths, evidence, and attribution without changing timestamps", async (t) => {
+test("SQLite content changes invalidate only work paths while transcript signatures stay adapter-owned", async (t) => {
   const { base, repo, repoRoot, otherRoot, scratch } = layout();
   const home = path.join(base, "hermes");
   fs.mkdirSync(home);
@@ -356,15 +356,20 @@ test("SQLite content changes invalidate work paths, evidence, and attribution wi
   update(repoRoot);
   const placed = (await scan()).transcripts[0];
   assert.equal(placed?.association.tier, 2.5);
-  const evidence = { status: "ok", key: evidenceKey(placed, "memory") };
+  const evidence = { status: "ok", key: evidenceKey({ ...placed, contentSignature: null }, "memory") };
+  assert.equal(placed.contentSignature, null);
+  assert.equal(isEvidenceFresh(evidence, placed, "memory"), true, "existing timestamp-keyed evidence stays fresh");
   assert.deepEqual((await attributeTranscripts([placed], repo, config.state)).get(placed.identity), ["src/app.ts"]);
   assert.equal(isEvidenceFresh(evidence, (await scan()).transcripts[0], "memory"), true);
   update(repoRoot, "src/new.ts");
   const changed = (await scan()).transcripts[0];
   assert.equal(changed.mtimeMs, placed.mtimeMs);
   assert.equal(changed.bytes, placed.bytes);
-  assert.equal(isEvidenceFresh(evidence, changed, "memory"), false, "changed calls invalidate analysis evidence");
-  assert.deepEqual((await attributeTranscripts([changed], repo, config.state)).get(changed.identity), ["src/new.ts"]);
+  assert.equal(changed.contentSignature, null);
+  assert.equal(isEvidenceFresh(evidence, changed, "memory"), true, "work hashes do not change evidence keys");
+  const attributionReads = read.mock.callCount();
+  assert.deepEqual((await attributeTranscripts([changed], repo, config.state)).get(changed.identity), ["src/app.ts"]);
+  assert.equal(read.mock.callCount(), attributionReads, "existing nested attribution stays cached");
   read.mock.resetCalls();
   update(otherRoot);
   assert.equal((await scan()).transcripts.length, 0, "changed tool input must not reuse the old majority");
@@ -390,8 +395,9 @@ test("SQLite content changes invalidate work paths, evidence, and attribution wi
     update(repoRoot, "src/new.ts");
     const revised = (await scan({ scope })).transcripts[0];
     assert.equal(revised.mtimeMs, ordinary.mtimeMs);
-    assert.equal(isEvidenceFresh(cached, revised, "memory"), false);
-    assert.deepEqual((await attributeTranscripts([revised], repo, config.state)).get(revised.identity), ["src/new.ts"]);
+    assert.equal(revised.contentSignature, null);
+    assert.equal(isEvidenceFresh(cached, revised, "memory"), true);
+    assert.deepEqual((await attributeTranscripts([revised], repo, config.state)).get(revised.identity), ["src/app.ts"]);
   }
   db.prepare("UPDATE sessions SET cwd = ?").run(scratch);
   update(repoRoot);
@@ -405,6 +411,14 @@ test("SQLite content changes invalidate work paths, evidence, and attribution wi
   assert.equal((await scan()).transcripts.length, 0);
   assert.deepEqual(config.state.readScanCache().work, prior);
   assert.ok(warnings.some((line) => line.includes("hermes") && line.includes("tool_calls")));
+  read.mock.resetCalls();
+  assert.equal((await scan({ scope: userScope, strict: false })).transcripts[0]?.association.tier, 3);
+  db.prepare("UPDATE sessions SET cwd = ?").run(repoRoot);
+  for (const scope of [null, userScope]) {
+    assert.equal((await scan({ scope })).transcripts[0]?.association.tier, 1);
+  }
+  assert.equal(read.mock.callCount(), 0, "already-associated sessions need no SQLite event read at scan time");
+  db.prepare("UPDATE sessions SET cwd = ?").run(scratch);
   db.exec("ALTER TABLE messages RENAME COLUMN broken TO tool_calls");
   assert.equal((await scan()).transcripts[0]?.association.tier, 2.5);
 
@@ -417,7 +431,7 @@ test("SQLite content changes invalidate work paths, evidence, and attribution wi
   assert.equal((await scan()).transcripts.length, 0, "work paths still use the freshly read events' hash");
 });
 
-test("Cursor CLI SQLite edits invalidate evidence and work-cache misses despite unchanged file headers", async (t) => {
+test("Cursor CLI SQLite edits invalidate only work-cache misses despite unchanged file headers", async (t) => {
   const { base, repo, repoRoot, scratch } = layout();
   const dir = path.join(base, "cursor-session");
   fs.mkdirSync(dir);
@@ -447,13 +461,18 @@ test("Cursor CLI SQLite edits invalidate evidence and work-cache misses despite 
   update("Original request");
   const first = (await scan()).transcripts[0];
   assert.equal(first.association.tier, 1);
-  const evidence = { status: "ok", key: evidenceKey(first, "memory") };
+  const evidence = { status: "ok", key: evidenceKey({ ...first, contentSignature: null }, "memory") };
+  assert.equal(first.contentSignature, null);
   assert.equal(isEvidenceFresh(evidence, (await scan()).transcripts[0], "memory"), true);
   update("Revised request");
   const revised = (await scan()).transcripts[0];
   assert.equal(revised.mtimeMs, first.mtimeMs);
   assert.equal(revised.bytes, first.bytes);
-  assert.equal(isEvidenceFresh(evidence, revised, "memory"), false);
+  assert.equal(revised.contentSignature, null);
+  assert.equal(isEvidenceFresh(evidence, revised, "memory"), true);
+  db.exec("ALTER TABLE blobs RENAME TO unreadable");
+  assert.equal((await scan()).transcripts[0]?.association.tier, 1, "associated sessions need no signing read");
+  db.exec("ALTER TABLE unreadable RENAME TO blobs");
 
   fs.writeFileSync(meta, JSON.stringify({ cwd: scratch }));
   assert.equal((await scan()).transcripts.length, 0);
