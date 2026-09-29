@@ -1,3 +1,4 @@
+import fs from "node:fs";
 import path from "node:path";
 
 import { emptyInteractionSignals, interactionSignals } from "../../interaction.js";
@@ -40,6 +41,16 @@ import { openReadOnly, safeJsonParse } from "./sqlite.js";
  * work cannot re-enter the corpus when its backpass-originated parent ages out of the
  * discovery window. A session with no messages at all, such as the one each agent probe
  * creates, is not listed.
+ *
+ * Besides the default store, a run reads each store named in the personal
+ * `discovery.opencodeStores` (an OpenCode data directory or a database file) - a copy of
+ * the store another OS's OpenCode app writes, say. That list lives in config rather than
+ * in `XDG_DATA_HOME` or `OPENCODE_DB` because acpx passes backpass's environment to the
+ * OpenCode it runs for analysis, which must keep its own store and login. Each row names
+ * the database it came from, which is where it is read again. A store reached twice is
+ * read once, and a session id already listed from an earlier store is skipped, so a
+ * copied session never counts twice. A configured store that is missing or unreadable is
+ * named and skipped; the default store's failure is the harness's, as before.
  */
 
 export const name = "opencode";
@@ -51,6 +62,34 @@ export function storeRoot() {
 
 export function dbPath() {
   return path.join(storeRoot(), "opencode.db");
+}
+
+/**
+ * The databases a run reads: the default store first, then each configured store. An
+ * entry naming a file (or a `.db` path) is that database; any other entry is an OpenCode
+ * data directory holding `opencode.db`.
+ *
+ * @param {{ discovery?: { opencodeStores?: string[] } } | null | undefined} config
+ * @returns {string[]}
+ */
+export function storeFiles(config) {
+  const configured = (config?.discovery?.opencodeStores || []).map((entry) =>
+    statOrNull(entry)?.isFile() || entry.endsWith(".db") ? entry : path.join(entry, "opencode.db"),
+  );
+  const seen = new Set();
+  const out = [];
+  for (const file of [dbPath(), ...configured]) {
+    let identity = path.resolve(file);
+    try {
+      identity = fs.realpathSync(file);
+    } catch {
+      // A store that is not there yet is compared by its spelling.
+    }
+    if (seen.has(identity)) continue;
+    seen.add(identity);
+    out.push(file);
+  }
+  return out;
 }
 
 function tableHasColumn(db, table, column) {
@@ -86,12 +125,41 @@ const V2_FIRST_USER_TEXT = `(SELECT CASE WHEN json_valid(m.data) THEN json_extra
     LIMIT 1)`;
 
 /**
- * Discovery is direct: one query per layout lists every session with its directory, and
- * the caller applies the shared association tiers.
+ * Discovery is direct: one query per layout and store lists every session with its
+ * directory, and the caller applies the shared association tiers.
+ *
+ * @param {{ cutoffMs?: number | null, config?: object, warn?: (message: string) => void }} [options]
  */
-export async function discover({ cutoffMs }) {
-  const db = await openReadOnly(dbPath());
-  if (!db) return legacyDiscover({ cutoffMs });
+export async function discover({ cutoffMs = null, config = null, warn = () => {} } = {}) {
+  const [primary, ...configured] = storeFiles(config);
+  const listed = new Set();
+  const out = [];
+  const add = (rows) => {
+    for (const row of rows) {
+      if (listed.has(row.id)) continue;
+      listed.add(row.id);
+      out.push(row);
+    }
+  };
+
+  add(await discoverStore(primary, cutoffMs, { legacyFallback: true }));
+  for (const file of configured) {
+    if (!fs.existsSync(file)) {
+      warn(`configured store ${file} not found - skipped`);
+      continue;
+    }
+    try {
+      add(await discoverStore(file, cutoffMs));
+    } catch (err) {
+      warn(`configured store ${file} unreadable (${err.message}) - skipped`);
+    }
+  }
+  return out;
+}
+
+async function discoverStore(file, cutoffMs, { legacyFallback = false } = {}) {
+  const db = await openReadOnly(file);
+  if (!db) return legacyFallback ? legacyDiscover({ cutoffMs }) : [];
 
   try {
     const v2 = hasTables(db, "session_v2", "session_message");
@@ -101,7 +169,7 @@ export async function discover({ cutoffMs }) {
     const self = selfSessions(sessions);
     return sessions
       .filter((session) => session.recorded && (cutoffMs == null || session.mtimeMs >= cutoffMs))
-      .map((session) => sessionRow(session, self.has(session.id)));
+      .map((session) => sessionRow(session, file, self.has(session.id)));
   } finally {
     db.close();
   }
@@ -180,11 +248,11 @@ function listV2(db) {
   }));
 }
 
-function sessionRow(session, self) {
+function sessionRow(session, file, self) {
   return {
     key: `opencode:${session.id}`,
     id: session.id,
-    path: dbPath(),
+    path: file,
     cwd: session.directory,
     gitRoot: session.worktree || null,
     gitBranch: null,
@@ -202,8 +270,10 @@ function sessionRow(session, self) {
   };
 }
 
+/** A session is read from the database discovery listed it in. */
 export async function read(ref) {
-  const db = await openReadOnly(dbPath());
+  if (ref.extra?.legacy) return legacyRead();
+  const db = await openReadOnly(ref.path || dbPath());
   if (!db) return legacyRead();
 
   try {

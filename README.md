@@ -242,6 +242,17 @@ session found in both is read from `session_v2`. In a 2.x session, text the harn
 (instruction files, continue notices, system notices) is left out, and the completion of a
 background subagent or shell becomes the result of the call that started it.
 
+`discovery.opencodeStores` in your personal config names more OpenCode stores to read beside
+the default one. Each entry is an OpenCode data directory (holding `opencode.db`) or a
+database file, such as a copy of the store the Windows OpenCode app keeps, read from WSL. It
+is a config list rather than `XDG_DATA_HOME` or `OPENCODE_DB` in backpass's environment
+because acpx passes that environment on to the OpenCode backpass runs for analysis, which
+must keep its own store and login. Each session is read from the store that lists it; a
+store named twice, or a session copied into two stores, is read once, from the first. A
+configured store that is missing or unreadable is named and skipped. Entries are absolute
+(`~/` is expanded), and like `discovery.hosts` the setting is refused in a repository's
+`.backpassrc.json`.
+
 Hermes collection includes CLI and ACP sessions, plus TUI sessions with an absolute
 `sessions.cwd`. Gateway, cron, and WhatsApp sessions are excluded because their recorded
 cwd belongs to a shared process, not a project.
@@ -786,6 +797,7 @@ CLI flags on top:
     "worktreeGlobs": [],
     "cloneRoots": [],
     "hosts": [],
+    "opencodeStores": [],
     "minUserTurns": 2
   },
   "jobs": 4
@@ -802,9 +814,9 @@ overrides when backpass is upgraded. To inherit a global pin there, remove the c
 all-null `analysis` or `synthesis` block from `.backpassrc.json`, then confirm it with
 `backpass status`.
 
-`discovery.hosts` is the one setting a repo file may not carry; it belongs in the personal
-configuration file named above. In user scope it defaults to that file's top-level list,
-so you name your machines once.
+`discovery.hosts` and `discovery.opencodeStores` are the settings a repo file may not carry;
+they belong in the personal configuration file named above. In user scope they default to
+that file's top-level lists, so you name your machines and stores once.
 
 That example is the project scope. User scope ignores `.backpassrc.json` and instead
 layers the `"user"` block in `$XDG_CONFIG_HOME/backpass/config.json` (default

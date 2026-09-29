@@ -281,7 +281,12 @@ function tierCounts(found) {
 }
 
 async function discoverDirect(adapter, { repo, config, cutoffMs, strict, stats, associateFn, stateDir, userFilter }) {
-  const rows = await adapter.discover({ cutoffMs, repo, config });
+  const rows = await adapter.discover({
+    cutoffMs,
+    repo,
+    config,
+    warn: (message) => warn(`${adapter.name}: ${message}`),
+  });
   const out = [];
   for (const row of rows) {
     stats.scanned += 1;

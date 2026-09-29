@@ -18,6 +18,7 @@ import { statOrNull } from "../src/discovery/adapters/shared.js";
 import { associate } from "../src/discovery/association.js";
 import { discoverTranscripts } from "../src/discovery/index.js";
 import { associateUser } from "../src/scope.js";
+import { readOpencodeFixture, withOpencodeHome, writeOpencodeStore } from "./helpers/opencode.js";
 
 const FIXTURES = path.join(path.dirname(fileURLToPath(import.meta.url)), "fixtures");
 
@@ -811,50 +812,6 @@ test("normal discovery associates only trustworthy Hermes TUI sessions in projec
   }
 });
 
-/** Build an opencode store from a golden fixture: the real DDL, then its rows in table order. */
-function writeOpencodeStore(dbFile, fixture, { skipTables = [] } = {}) {
-  fs.mkdirSync(path.dirname(dbFile), { recursive: true });
-  const db = new DatabaseSync(dbFile);
-  try {
-    for (const statement of fixture.schema) {
-      const table = statement.match(/^CREATE TABLE `([^`]+)`/)?.[1];
-      if (!skipTables.includes(table)) db.exec(statement);
-    }
-    for (const [table, rows] of Object.entries(fixture.rows)) {
-      if (skipTables.includes(table)) continue;
-      for (const row of rows) {
-        const columns = Object.keys(row);
-        db.prepare(`INSERT INTO ${table} (${columns.join(", ")}) VALUES (${columns.map(() => "?").join(", ")})`).run(
-          ...columns.map((column) =>
-            row[column] && typeof row[column] === "object" ? JSON.stringify(row[column]) : row[column],
-          ),
-        );
-      }
-    }
-  } finally {
-    db.close();
-  }
-}
-
-function readFixture(name) {
-  return JSON.parse(fs.readFileSync(path.join(FIXTURES, name), "utf8"));
-}
-
-async function withOpencodeHome(build, fn) {
-  const homeDir = fs.mkdtempSync(path.join(os.tmpdir(), "backpass-opencode-home-"));
-  const dbFile = path.join(homeDir, ".local", "share", "opencode", "opencode.db");
-  const previous = process.env.HOME;
-  try {
-    build(dbFile);
-    process.env.HOME = homeDir;
-    return await fn(dbFile);
-  } finally {
-    if (previous === undefined) delete process.env.HOME;
-    else process.env.HOME = previous;
-    fs.rmSync(homeDir, { recursive: true, force: true });
-  }
-}
-
 test("opencode test homes are removed and HOME restored on success and failure", async () => {
   const original = process.env.HOME;
   try {
@@ -896,7 +853,7 @@ const V2_RESUMED = "ses_f0a1b2c3dffeResumedSession01";
 
 test("opencode adapter lists an OpenCode 2 store by session_v2, dated by its newest message", async () => {
   await withOpencodeHome(
-    (dbFile) => writeOpencodeStore(dbFile, readFixture("opencode-v2-store.json")),
+    (dbFile) => writeOpencodeStore(dbFile, readOpencodeFixture("opencode-v2-store.json")),
     async (dbFile) => {
       const rows = await opencode.discover({ cutoffMs: null });
       const byId = new Map(rows.map((row) => /** @type {[string, any]} */ ([row.id, row])));
@@ -928,7 +885,7 @@ test("opencode adapter lists an OpenCode 2 store by session_v2, dated by its new
 });
 
 test("opencode adapter counts epoch-dated messages as recorded", async () => {
-  const fixture = readFixture("opencode-v2-store.json");
+  const fixture = readOpencodeFixture("opencode-v2-store.json");
   for (const message of fixture.rows.session_message) message.time_updated = 0;
   await withOpencodeHome(
     (dbFile) => writeOpencodeStore(dbFile, fixture),
@@ -944,7 +901,7 @@ test("opencode adapter counts epoch-dated messages as recorded", async () => {
 
 test("opencode adapter reads an OpenCode 2 session: turns and calls in order, harness text left out", async () => {
   await withOpencodeHome(
-    (dbFile) => writeOpencodeStore(dbFile, readFixture("opencode-v2-store.json")),
+    (dbFile) => writeOpencodeStore(dbFile, readOpencodeFixture("opencode-v2-store.json")),
     async () => {
       const [parent] = (await opencode.discover({ cutoffMs: null })).filter((row) => row.id === V2_PARENT);
       const { events, model } = await opencode.read(parent);
@@ -993,7 +950,7 @@ test("opencode adapter reads an OpenCode 2 session: turns and calls in order, ha
 
 test("opencode adapter still reads an OpenCode 1.x store, which leaves session_message empty", async () => {
   await withOpencodeHome(
-    (dbFile) => writeOpencodeStore(dbFile, readFixture("opencode-v1-store.json")),
+    (dbFile) => writeOpencodeStore(dbFile, readOpencodeFixture("opencode-v1-store.json")),
     async () => {
       const [row, ...rest] = await opencode.discover({ cutoffMs: null });
       assert.deepEqual(rest, []);
@@ -1021,8 +978,8 @@ test("opencode adapter still reads an OpenCode 1.x store, which leaves session_m
 });
 
 test("an upgraded opencode store is read from session_v2, where each copied session continues", async () => {
-  const v1 = readFixture("opencode-v1-store.json");
-  const v2 = readFixture("opencode-v2-store.json");
+  const v1 = readOpencodeFixture("opencode-v1-store.json");
+  const v2 = readOpencodeFixture("opencode-v2-store.json");
   await withOpencodeHome(
     (dbFile) => {
       writeOpencodeStore(dbFile, v2);
