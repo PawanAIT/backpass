@@ -17,10 +17,8 @@ import { isWindowsPath, localPath } from "./paths.js";
  *   tier 3    best-effort    - dead cwd whose last segment is the repo dir name, or that
  *                              matches a user-supplied worktree glob; excluded by --strict
  *
- * The path tiers (1, 1.5, 3) only ever see a cwd this machine can spell (`./paths.js`):
- * a Windows path read on a POSIX host is no path here, so it matches nothing rather than
- * resolving under the process cwd, unless WSL mounts it here (`C:\work` is `/mnt/c/work`).
- * A recorded remote (tier 2) still associates it.
+ * The path tiers (1, 1.5, 3) require a local mapping from `localPath` in `./paths.js`;
+ * an unmappable cwd must not resolve under the process cwd. Tier 2 needs no local path.
  *
  * Returns null when the transcript belongs to some other repo.
  */
@@ -141,7 +139,7 @@ export function associate(descriptor, repo, options = {}) {
  */
 export function associateRemote({ cwd, remotes = [], gitRoot = null }, repo, options = {}) {
   const { facts = {}, host = "", home = "", worktreeGlobs: globs = [] } = options;
-  // Hosts are POSIX (Windows remotes are out of scope), so a Windows path names nothing there.
+  // Remote Windows paths are unsupported; this machine's WSL mappings do not describe the host.
   const candidates = [cwd, gitRoot].filter((recorded) => recorded && !isWindowsPath(recorded));
   const repoRemotes = new Set(repo.remotes);
 

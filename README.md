@@ -258,9 +258,10 @@ Association runs in four tiers:
    or one matching a glob you configured. Labelled as such, and excluded by `--strict`.
 
 On macOS and Linux outside WSL, recorded Windows drive paths (`C:\work\repo`, `C:/work/repo`) and UNC paths (`\\server\share\repo`, `//server/share/repo`) are excluded from the path tiers and nested-file attribution; a matching recorded git remote still associates the session at tier 2.
-In user scope, when no recorded remote supplies a project key, such a cwd remains a tier-3 key in its original spelling, never resolved against the process cwd, and `--strict` excludes it.
-Under WSL, such a path is read the way WSL mounts it: `C:\work\repo` is `/mnt/c/work/repo` (wherever `/proc/mounts` puts that drive), and `\\wsl.localhost\<distro>\home\me\repo` (or `\\wsl$\...`) is `/home/me/repo` when `<distro>` is the distro backpass runs in (`WSL_DISTRO_NAME`).
-A drive WSL has not mounted, another distro, or a network share is still excluded.
+Under WSL, recorded session cwds and tool-call paths use the local filesystem mapping: a drive path such as `C:\work\repo` maps through the drive-root mount reported in `/proc/self/mountinfo` (normally `/mnt/c/work/repo`), and `\\wsl.localhost\<distro>\home\me\repo` or `\\wsl$\<distro>\home\me\repo` maps to `/home/me/repo` when `<distro>` matches `WSL_DISTRO_NAME`, case-insensitively.
+Forward-slash spellings work too, including `C:/work/repo` and `//wsl.localhost/<distro>/home/me/repo`.
+A drive without a drive-root mount, another distro, or a network share remains excluded from path-based association and nested-file attribution; a matching recorded remote can still associate the session.
+In user scope, when a cwd has no local mapping and no recorded remote supplies a project key, it remains a tier-3 key in its original spelling, never resolved against the process cwd, and `--strict` excludes it.
 Windows hosts retain native path handling.
 
 Configured SSH hosts are collected after the local stores and join the same corpus, with

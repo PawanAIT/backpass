@@ -9,18 +9,15 @@ import path from "node:path";
  * paths (`C:\work\repo`, `C:/work/repo`) and backslash UNC paths (`\\server\share`)
  * resolve under the process cwd, risking false association with the current repo.
  * Forward-slash UNC paths (`//server/share`) are absolute on POSIX but resolve as local
- * paths rather than Windows network shares, so they must also be refused.
+ * paths rather than Windows network shares, so they must not bypass local mapping.
  *
- * Every reader that resolves a recorded path - association, user-scope project keys, and
- * nested-file attribution - goes through `localPath` first, so a path that names no place
- * on this machine is refused once, here, instead of being resolved against the wrong
- * base. On Windows the recorded spelling is already local.
+ * Local association, user-scope project keys, and nested-file attribution go through
+ * `localPath` first, so a path that names no place on this machine is refused once,
+ * here, instead of being resolved against the wrong base.
+ * On Windows the recorded spelling is already local.
  *
- * Under WSL the same Windows paths do name places here, and are read the way WSL itself
- * mounts them: a drive path lives wherever `/proc/mounts` mounts that drive (`/mnt/c` by
- * default), and `\\wsl.localhost\<distro>\...` or `\\wsl$\<distro>\...` is this distro's
- * own filesystem when `<distro>` is the one backpass runs in (`WSL_DISTRO_NAME`). A drive
- * that is not mounted, another distro, or a network share still names nothing here.
+ * WSL mappings require local mount or distro identity, never a guessed `/mnt/<drive>`.
+ * See README.md's association tiers for the supported Windows path spellings.
  */
 
 const WINDOWS_DRIVE = /^[A-Za-z]:(?:[\\/]|$)/;
@@ -68,7 +65,7 @@ function fromWindows(recorded, { distro, drives }) {
   return null;
 }
 
-/** `/proc/mounts` escapes a space, tab, newline or backslash in a field as octal. */
+/** Mountinfo escapes a space, tab, newline or backslash in a field as octal. */
 function unescapeMountField(field) {
   return field.replace(/\\([0-7]{3})/g, (_, octal) => String.fromCharCode(parseInt(octal, 8)));
 }
@@ -76,6 +73,8 @@ function unescapeMountField(field) {
 /**
  * Windows drives and where WSL mounted them, from `/proc/self/mountinfo` text: drvfs names each
  * mount by its drive (`C:\` under WSL 2, `C:` under WSL 1).
+ * Only drive-root mounts establish a mapping; a bind of a subdirectory must not make
+ * unrelated paths on that drive appear local (see test/association.test.js).
  *
  * @param {string} text
  * @returns {Map<string, string>} lower-case drive letter -> mount point

@@ -272,10 +272,11 @@ export function toolPaths(events) {
 
 /**
  * Where one session worked, as sorted repo-relative paths from tool calls, falling back
- * to its cwd when no tool paths are recorded. Paths outside known checkouts are dropped,
- * and so is a path this machine cannot spell (`localPath`): a Windows path read on a
- * POSIX host is never resolved against the cwd, and neither is a relative path whose
- * call ran in such a workdir. Under WSL a mounted Windows path is read where WSL puts it.
+ * to its cwd when no tool paths are recorded. Paths outside known checkouts are dropped.
+ * `localPath` in discovery/paths.js owns local mappings; an unmappable tool path or
+ * workdir must not fall back to the process cwd.
+ * Relative and backslash-rooted paths inherit their recorded base's Windows semantics
+ * before mapping, so a drive or share root remains the boundary for `..`.
  *
  * @param {{ cwd?: string | null }} transcript
  * @param {object[]} events
