@@ -50,7 +50,7 @@ import { transcriptIdentity } from "./transcript.js";
  * single-primary run it always was.
  */
 
-export const ATTRIBUTION_VERSION = 6;
+export const ATTRIBUTION_VERSION = 7;
 
 /** Tool-input fields that name a file or directory a session worked in. */
 const PATH_FIELDS = ["file_path", "filePath", "notebook_path", "path"];
@@ -289,16 +289,24 @@ export function workedPaths(transcript, events, roots, { wsl } = {}) {
   const named = toolPaths(events);
   if (!named.length && cwd) named.push({ raw: cwd, workdir: null });
   for (const entry of named) {
-    let raw = localPath(entry.raw, { wsl });
-    let workdir = entry.workdir === null ? null : localPath(entry.workdir, { wsl });
-    if (raw === null || (entry.workdir !== null && workdir === null)) continue;
-    if (raw.startsWith("~") || workdir?.startsWith("~")) continue;
-    const windowsBase =
-      workdir && path.isAbsolute(workdir) ? isWindowsPath(entry.workdir) : isWindowsPath(transcript.cwd);
-    if (workdir && !path.isAbsolute(workdir) && isWindowsPath(transcript.cwd)) {
-      workdir = workdir.replaceAll("\\", "/");
+    if (entry.raw.startsWith("~") || entry.workdir?.startsWith("~")) continue;
+    let recordedWorkdir = entry.workdir;
+    if (
+      recordedWorkdir &&
+      !path.isAbsolute(recordedWorkdir) &&
+      !isWindowsPath(recordedWorkdir) &&
+      isWindowsPath(transcript.cwd)
+    ) {
+      recordedWorkdir = path.win32.resolve(`${transcript.cwd}\\`, recordedWorkdir);
     }
-    if (!path.isAbsolute(raw) && windowsBase) raw = raw.replaceAll("\\", "/");
+    const workdir = recordedWorkdir === null ? null : localPath(recordedWorkdir, { wsl });
+    const recordedBase = workdir && path.isAbsolute(workdir) ? recordedWorkdir : transcript.cwd;
+    const recordedRaw =
+      !path.isAbsolute(entry.raw) && !isWindowsPath(entry.raw) && isWindowsPath(recordedBase)
+        ? path.win32.resolve(`${recordedBase}\\`, entry.raw)
+        : entry.raw;
+    const raw = localPath(recordedRaw, { wsl });
+    if (raw === null || (entry.workdir !== null && workdir === null)) continue;
     const base = workdir ? (path.isAbsolute(workdir) ? workdir : cwd ? path.resolve(cwd, workdir) : null) : cwd;
     if (!path.isAbsolute(raw) && !base) continue;
     const relative = projectWorkPath(path.resolve(base || "", raw), roots);

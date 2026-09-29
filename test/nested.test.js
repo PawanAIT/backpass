@@ -352,6 +352,63 @@ test(
   },
 );
 
+test(
+  "under WSL rooted tool paths and workdirs resolve inside their recorded drive or share",
+  { skip: process.platform === "win32" && "Windows spells these paths natively" },
+  () => {
+    const repo = makeRepo({ "windows drive/work/repo/apps/api/x.ts": "" });
+    const mount = path.join(repo.root, "windows drive");
+    const root = path.join(mount, "work/repo");
+    const wsl = { distro: "Ubuntu", drives: new Map([["c", mount]]) };
+    const cases = [
+      { base: "C:\\work\\repo", rooted: "\\work\\repo\\apps\\api" },
+      { base: "C:/work/repo", rooted: "\\work/repo/apps/api" },
+      {
+        base: `\\\\wsl.localhost\\Ubuntu${root.replaceAll("/", "\\")}`,
+        rooted: `${root}/apps/api`.replaceAll("/", "\\"),
+      },
+      { base: `//wsl$/Ubuntu${root}`, rooted: `${root}/apps/api`.replaceAll("/", "\\") },
+    ];
+    const inputs = (raw) => [
+      ...["file_path", "filePath", "notebook_path", "path"].map((field) => ({ [field]: raw })),
+      ...["Add File", "Update File", "Delete File", "Move to"].flatMap((action) => {
+        const patch = `*** Begin Patch\n*** ${action}: ${raw}\n*** End Patch`;
+        return [patch, { patch }];
+      }),
+    ];
+    for (const { base, rooted } of cases) {
+      const cwd = `${base}\\sub`;
+      for (const input of inputs(`${rooted}\\x.ts`)) {
+        const paths = workedPaths({ cwd }, [{ kind: "tool", input }], [root], { wsl });
+        assert.deepEqual(paths, ["apps/api/x.ts"]);
+        assert.equal(owningFile(["session"], [API], new Map([["session", paths]])), API.path);
+      }
+      for (const field of ["workdir", "cwd"]) {
+        for (const workdir of [rooted, "..\\apps\\api", `${base}\\apps\\api`]) {
+          for (const input of inputs("x.ts").filter((input) => typeof input === "object")) {
+            assert.deepEqual(
+              workedPaths({ cwd }, [{ kind: "tool", input: { ...input, [field]: workdir } }], [root], { wsl }),
+              ["apps/api/x.ts"],
+            );
+          }
+          const input = { path: `${rooted}\\x.ts`, [field]: workdir };
+          assert.deepEqual(workedPaths({ cwd }, [{ kind: "tool", input }], [root], { wsl }), ["apps/api/x.ts"]);
+        }
+        const input = { path: `${rooted}\\x.ts`, [field]: base };
+        assert.deepEqual(workedPaths({ cwd: repo.root }, [{ kind: "tool", input }], [root], { wsl }), ["apps/api/x.ts"]);
+      }
+    }
+    for (const raw of ["..\\..\\..\\work\\repo\\apps\\api\\x.ts", "~/apps/api/x.ts"]) {
+      const paths = workedPaths({ cwd: "C:\\work\\repo" }, [{ kind: "tool", input: { path: raw } }], [root], { wsl });
+      assert.deepEqual(paths, raw.startsWith("~") ? [] : ["apps/api/x.ts"]);
+    }
+    for (const cwd of ["F:\\work\\repo", "\\\\wsl.localhost\\Debian\\work\\repo", "\\\\server\\share\\work\\repo"]) {
+      const input = { path: "\\work\\repo\\apps\\api\\x.ts" };
+      assert.deepEqual(workedPaths({ cwd }, [{ kind: "tool", input }], [root], { wsl }), []);
+    }
+  },
+);
+
 test("out-of-repo paths do not make in-repo API work cross-cutting", async () => {
   const repo = makeRepo({ "apps/api/AGENTS.md": "# API\n" });
   const paths = workedPaths(
