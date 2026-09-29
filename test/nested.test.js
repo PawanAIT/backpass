@@ -302,6 +302,49 @@ test(
 );
 
 test(
+  "absolute tool paths survive unusable workdirs without admitting dependent paths",
+  { skip: process.platform === "win32" && "Windows spells these paths natively" },
+  () => {
+    const repo = makeRepo({ "apps/api/x.ts": "" });
+    const roots = checkoutRoots(repo);
+    const wsl = { distro: "Ubuntu", drives: new Map([["c", repo.root]]) };
+    const unc = `//wsl.localhost/Ubuntu${repo.root}`;
+    const inputs = (raw) => [
+      ...["file_path", "filePath", "notebook_path", "path"].map((field) => ({ [field]: raw })),
+      ...["Add File", "Update File", "Delete File", "Move to"].map((action) => ({
+        patch: `*** Begin Patch\n*** ${action}: ${raw}\n*** End Patch`,
+      })),
+    ];
+    const absolutePaths = [
+      path.join(repo.root, "apps/api/x.ts"),
+      "C:\\apps\\api\\x.ts",
+      "C:/apps/api/x.ts",
+      `${unc}/apps/api/x.ts`,
+      `//wsl$/Ubuntu${repo.root}/apps/api/x.ts`,
+    ].flatMap((raw) => (raw.startsWith("//") ? [raw, raw.replaceAll("/", "\\")] : [raw]));
+    for (const cwd of [repo.root, "C:\\", unc]) {
+      for (const workdir of ["Y:\\work", "//wsl$/Debian/work", "//server/share/work", "~/work"]) {
+        for (const field of ["workdir", "cwd"]) {
+          for (const raw of [...absolutePaths, "apps/api/x.ts", "apps\\api\\x.ts", "\\apps\\api\\x.ts"]) {
+            for (const input of inputs(raw)) {
+              const paths = workedPaths({ cwd }, [{ kind: "tool", input: { ...input, [field]: workdir } }], roots, {
+                wsl,
+              });
+              const independent = absolutePaths.includes(raw);
+              assert.deepEqual(paths, independent ? ["apps/api/x.ts"] : [], `${cwd} / ${workdir} / ${raw}`);
+              assert.equal(
+                owningFile(["session"], [API], new Map([["session", paths]])),
+                independent ? API.path : null,
+              );
+            }
+          }
+        }
+      }
+    }
+  },
+);
+
+test(
   "under WSL relative tool paths and workdirs inherit the recorded base's separators",
   { skip: process.platform === "win32" && "Windows spells these paths natively" },
   () => {
@@ -460,6 +503,44 @@ test("attribution reads a local session once, and never places a session that ra
   const second = await attributeTranscripts([local], repo, state);
   assert.deepEqual(second.get(transcriptIdentity(local)), ["apps/api/src/orders.ts"]);
 });
+
+test(
+  "attribution refreshes version 7 paths that discarded an absolute path with an unmappable workdir",
+  { skip: process.platform === "win32" && "Windows spells these paths natively" },
+  async () => {
+    const repo = makeRepo({ "apps/api/x.ts": "" });
+    const state = new State(repo.root).ensure();
+    const sessionPath = path.join(repo.root, "session.jsonl");
+    const entries = [
+      { type: "session", version: 3, id: "absolute", cwd: repo.root },
+      {
+        type: "message",
+        message: {
+          role: "assistant",
+          content: [
+            {
+              type: "toolCall",
+              id: "t1",
+              name: "edit",
+              arguments: { path: path.join(repo.root, "apps/api/x.ts"), workdir: "//server/share/work" },
+            },
+          ],
+        },
+      },
+    ];
+    fs.writeFileSync(sessionPath, entries.map((entry) => JSON.stringify(entry)).join("\n") + "\n");
+    const transcript = { harness: "pi", id: "absolute", path: sessionPath, cwd: repo.root, contentSignature: "same" };
+    const identity = transcriptIdentity(transcript);
+    state.writeJsonFile(path.join(state.root, "nested", "attribution.json"), {
+      version: 7,
+      roots: checkoutRoots(repo),
+      entries: { [identity]: { content: "same", paths: [] } },
+    });
+    const attribution = await attributeTranscripts([transcript], repo, state);
+    assert.deepEqual(attribution.get(identity), ["apps/api/x.ts"]);
+    assert.equal(owningFile([identity], [API], attribution), API.path);
+  },
+);
 
 test("attribution cache changes when a sibling checkout becomes known", async () => {
   const repo = makeRepo({ "AGENTS.md": "# root\n" });

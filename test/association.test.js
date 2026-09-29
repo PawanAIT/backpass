@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 
 import { associate, globToRegExp, passesStrict } from "../src/discovery/association.js";
-import { isWindowsPath, localPath, parseDriveMounts, wslEnvironment } from "../src/discovery/paths.js";
+import { isWindowsPath, localPath, parseDriveMounts } from "../src/discovery/paths.js";
 import { normalizeRemote } from "../src/repo.js";
 
 /** A repo identity backed by one real directory, so tier-1/tier-3 liveness is genuine. */
@@ -252,10 +252,24 @@ test(
   },
 );
 
-test("wslEnvironment is only WSL on Linux, where WSL_DISTRO_NAME names the distro", () => {
-  assert.equal(wslEnvironment({ platform: "darwin", env: { WSL_DISTRO_NAME: "Ubuntu" } }), null);
-  assert.equal(wslEnvironment({ platform: "win32", env: { WSL_DISTRO_NAME: "Ubuntu" } }), null);
-  assert.equal(wslEnvironment({ platform: "linux", env: { WSL_DISTRO_NAME: "Ubuntu" } })?.distro, "Ubuntu");
+test("wslEnvironment requires a WSL kernel, not just an inherited distro name", async (t) => {
+  const release = t.mock.method(os, "release");
+  for (const kernel of ["6.8.0-generic", "4.4.0-Microsoft", "6.6.87.2-microsoft-standard-WSL2"]) {
+    release.mock.mockImplementation(() => kernel);
+    // Each module instance detects its kernel once, just like a fresh process.
+    const { wslEnvironment } = await import(`../src/discovery/paths.js?kernel=${kernel}`);
+    for (const platform of ["linux", "darwin", "win32"]) {
+      for (const distro of ["Ubuntu", undefined]) {
+        const environment = wslEnvironment({ platform, env: { WSL_DISTRO_NAME: distro } });
+        if (platform !== "linux" || kernel === "6.8.0-generic") {
+          assert.equal(environment, null, `${platform} / ${kernel} / ${distro}`);
+        } else {
+          assert.equal(environment.distro, distro || null);
+          assert.ok(environment.drives instanceof Map);
+        }
+      }
+    }
+  }
 });
 
 test("--strict keeps only the deterministic tiers", () => {

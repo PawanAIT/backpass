@@ -109,7 +109,7 @@ export function wslEnvironment({ platform = process.platform, env = process.env 
   if (platform !== "linux") return null;
   const distro = env.WSL_DISTRO_NAME || null;
   if (wslKernel === null) wslKernel = /microsoft/i.test(os.release());
-  if (!distro && !wslKernel) return null;
+  if (!wslKernel) return null;
   if (driveTable === null) {
     try {
       driveTable = parseDriveMounts(fs.readFileSync("/proc/self/mountinfo", "utf8"));

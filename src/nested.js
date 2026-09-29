@@ -50,7 +50,7 @@ import { transcriptIdentity } from "./transcript.js";
  * single-primary run it always was.
  */
 
-export const ATTRIBUTION_VERSION = 7;
+export const ATTRIBUTION_VERSION = 8;
 
 /** Tool-input fields that name a file or directory a session worked in. */
 const PATH_FIELDS = ["file_path", "filePath", "notebook_path", "path"];
@@ -274,7 +274,7 @@ export function toolPaths(events) {
  * Where one session worked, as sorted repo-relative paths from tool calls, falling back
  * to its cwd when no tool paths are recorded. Paths outside known checkouts are dropped.
  * `localPath` in discovery/paths.js owns local mappings; an unmappable tool path or
- * workdir must not fall back to the process cwd.
+ * workdir must not fall back to the process cwd. Absolute tool paths do not need a workdir.
  * Relative and backslash-rooted paths inherit their recorded base's Windows semantics
  * before mapping, so a drive or share root remains the boundary for `..`.
  *
@@ -290,7 +290,8 @@ export function workedPaths(transcript, events, roots, { wsl } = {}) {
   const named = toolPaths(events);
   if (!named.length && cwd) named.push({ raw: cwd, workdir: null });
   for (const entry of named) {
-    if (entry.raw.startsWith("~") || entry.workdir?.startsWith("~")) continue;
+    const independent = path.isAbsolute(entry.raw) || isWindowsPath(entry.raw);
+    if (entry.raw.startsWith("~") || (!independent && entry.workdir?.startsWith("~"))) continue;
     let recordedWorkdir = entry.workdir;
     if (
       recordedWorkdir &&
@@ -301,13 +302,12 @@ export function workedPaths(transcript, events, roots, { wsl } = {}) {
       recordedWorkdir = path.win32.resolve(`${transcript.cwd}\\`, recordedWorkdir);
     }
     const workdir = recordedWorkdir === null ? null : localPath(recordedWorkdir, { wsl });
+    if (!independent && entry.workdir !== null && workdir === null) continue;
     const recordedBase = workdir && path.isAbsolute(workdir) ? recordedWorkdir : transcript.cwd;
     const recordedRaw =
-      !path.isAbsolute(entry.raw) && !isWindowsPath(entry.raw) && isWindowsPath(recordedBase)
-        ? path.win32.resolve(`${recordedBase}\\`, entry.raw)
-        : entry.raw;
+      !independent && isWindowsPath(recordedBase) ? path.win32.resolve(`${recordedBase}\\`, entry.raw) : entry.raw;
     const raw = localPath(recordedRaw, { wsl });
-    if (raw === null || (entry.workdir !== null && workdir === null)) continue;
+    if (raw === null) continue;
     const base = workdir ? (path.isAbsolute(workdir) ? workdir : cwd ? path.resolve(cwd, workdir) : null) : cwd;
     if (!path.isAbsolute(raw) && !base) continue;
     const relative = projectWorkPath(path.resolve(base || "", raw), roots);
