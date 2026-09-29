@@ -4,6 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
+import { spawnSync } from "node:child_process";
 
 /**
  * backpass's own analysis/synthesis calls are filed by each harness under this repo's
@@ -258,6 +259,66 @@ test("the exclusion survives the scan cache (a cached descriptor is still checke
   assert.equal(second.perHarness.pi.self, 1);
 });
 
+test("OpenCode attachment-only conversations survive CLI scans and shipped probes", async (t) => {
+  const { buildProbeProgram } = await import("../src/discovery/remote/bundle.js");
+  const db = new DatabaseSync(path.join(fakeHome, ".local", "share", "opencode", "opencode.db"));
+  const id = "ses_opencode_attachment";
+  const reply = "The screenshot shows a missing release tag. Create the tag before publishing.";
+  try {
+    writeOpencodeSessions(db, [{ id, firstUserText: "placeholder" }]);
+    const update = db.prepare("UPDATE part SET data = ? WHERE id = ?");
+    update.run(
+      JSON.stringify({
+        type: "file",
+        mime: "image/png",
+        filename: "failure.png",
+        url: "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=",
+      }),
+      `prt_${id}_0_0`,
+    );
+    update.run(JSON.stringify({ type: "text", text: reply }), `prt_${id}_1_1`);
+    const initialized = spawnSync("git", ["init", "-q", realRoot], { encoding: "utf8" });
+    assert.equal(initialized.status, 0, initialized.stderr);
+
+    await t.test("CLI retains the conversation but not the empty probe or self session", () => {
+      for (let scan = 0; scan < 2; scan++) {
+        const result = spawnSync(
+          process.execPath,
+          [path.resolve("bin/backpass.js"), "scan", "--harness", "opencode", "--since", "all", "--strict", "--json"],
+          { cwd: realRoot, encoding: "utf8", timeout: 30000 },
+        );
+        assert.equal(result.status, 0, result.stderr);
+        const output = JSON.parse(result.stdout);
+        assert.deepEqual(output.transcripts.map((entry) => entry.nativeId).sort(), [id, "ses_opencode_real"]);
+        assert.equal(output.perHarness.opencode.scanned, 3);
+        assert.equal(output.perHarness.opencode.self, 1);
+      }
+    });
+
+    await t.test("shipped probe retains the conversation but not the empty probe or self session", () => {
+      const result = spawnSync(process.execPath, ["-"], {
+        cwd: realRoot,
+        encoding: "utf8",
+        timeout: 30000,
+        input: buildProbeProgram({ op: "discover", harnesses: ["opencode"], cutoffMs: null }),
+      });
+      assert.equal(result.status, 0, result.stderr);
+      const output = JSON.parse(result.stdout);
+      assert.deepEqual(output.transcripts.map((entry) => entry.id).sort(), [id, "ses_opencode_real"]);
+      assert.equal(output.harnesses.opencode.scanned, 3);
+      assert.equal(output.harnesses.opencode.self, 1);
+    });
+
+    const { read } = await import("../src/discovery/adapters/opencode.js");
+    assert.deepEqual((await read({ id })).events, [{ kind: "message", role: "assistant", text: reply }]);
+  } finally {
+    db.prepare("DELETE FROM part WHERE session_id = ?").run(id);
+    db.prepare("DELETE FROM message WHERE session_id = ?").run(id);
+    db.prepare("DELETE FROM session WHERE id = ?").run(id);
+    db.close();
+  }
+});
+
 test("malformed OpenCode rows do not suppress valid sessions locally or remotely", async (t) => {
   const { discover } = await import("../src/discovery/remote/probe.js");
   const db = new DatabaseSync(path.join(fakeHome, ".local", "share", "opencode", "opencode.db"));
@@ -269,6 +330,9 @@ test("malformed OpenCode rows do not suppress valid sessions locally or remotely
     for (const column of ["message", "part"]) {
       for (const sessionId of ["ses_opencode_real", "ses_opencode_self", "ses_other"]) {
         await t.test(`${column} corruption in ${sessionId}`, async () => {
+          // Recorded but unreadable messages are not unused probes. Remote discovery
+          // lists them; local association still excludes the unrelated repository.
+          const remoteIds = sessionId === "ses_other" ? ["ses_opencode_real", "ses_other"] : ["ses_opencode_real"];
           db.prepare("INSERT INTO message (id, session_id, time_created, data) VALUES (?, ?, ?, ?)").run(
             "msg_corrupt",
             sessionId,
@@ -289,13 +353,13 @@ test("malformed OpenCode rows do not suppress valid sessions locally or remotely
               assert.equal(local.perHarness.opencode.error, null);
               assert.deepEqual(local.transcripts.map((entry) => entry.nativeId), ["ses_opencode_real"]);
               assert.equal(local.perHarness.opencode.self, 1);
-              assert.equal(local.perHarness.opencode.scanned, 2);
+              assert.equal(local.perHarness.opencode.scanned, remoteIds.length + 1);
             }
             const remote = await discover({ harnesses: ["opencode"], cutoffMs: at });
             assert.equal(remote.harnesses.opencode.error, null);
-            assert.deepEqual(remote.transcripts.map((entry) => entry.id), ["ses_opencode_real"]);
+            assert.deepEqual(remote.transcripts.map((entry) => entry.id).sort(), remoteIds);
             assert.equal(remote.harnesses.opencode.self, 1);
-            assert.equal(remote.harnesses.opencode.scanned, 2);
+            assert.equal(remote.harnesses.opencode.scanned, remoteIds.length + 1);
           } finally {
             db.prepare("DELETE FROM part WHERE id = ?").run("prt_corrupt");
             db.prepare("DELETE FROM message WHERE id = ?").run("msg_corrupt");

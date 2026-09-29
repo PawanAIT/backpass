@@ -22,7 +22,7 @@ import { openReadOnly, safeJsonParse } from "./sqlite.js";
  * store under the repo's cwd. There is no transcript file for `../self.js` to read, so
  * the listing query reads each session's first user text part and the row is marked
  * `self` when it opens with the sentinel every backpass prompt starts with. A session
- * with no user text at all, such as the one each agent probe creates, is not listed.
+ * with no messages at all, such as the one each agent probe creates, is not listed.
  */
 
 export const name = "opencode";
@@ -69,6 +69,10 @@ export async function discover({ cutoffMs }) {
   try {
     const parentSelect = tableHasColumn(db, "session", "parent_id") ? ", s.parent_id AS parent_id" : "";
     const firstUserSelect = hasTables(db, "message", "part") ? `, ${FIRST_USER_PART} AS first_user_part` : "";
+    // Unused probes have no messages; attachment conversations need not have user text.
+    const recordedFilter = hasTables(db, "message")
+      ? " AND EXISTS (SELECT 1 FROM message m WHERE m.session_id = s.id)"
+      : "";
     const rows = db
       .prepare(
         `SELECT s.id AS id, s.directory AS directory, s.title AS title,
@@ -76,7 +80,7 @@ export async function discover({ cutoffMs }) {
                 p.worktree AS worktree${parentSelect}${firstUserSelect}
            FROM session s
            LEFT JOIN project p ON p.id = s.project_id
-          WHERE (? IS NULL OR s.time_updated >= ?)`,
+          WHERE (? IS NULL OR s.time_updated >= ?)${recordedFilter}`,
       )
       .all(cutoffMs ?? null, cutoffMs ?? 0);
 
@@ -92,11 +96,7 @@ export async function discover({ cutoffMs }) {
             FROM session s JOIN ancestors a ON s.id = a.id`)
         : null;
 
-    // A session with no user text recorded nothing: opencode files one for every acpx
-    // `sessions new` (backpass's own agent probes among them) and every window opened and
-    // closed unused. It is not listed.
-    const recorded = firstUserSelect ? rows.filter((row) => row.first_user_part != null) : rows;
-    return recorded.map((row) => ({
+    return rows.map((row) => ({
       key: `opencode:${row.id}`,
       id: row.id,
       path: dbPath(),
